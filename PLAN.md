@@ -1,6 +1,6 @@
 ## sql outstanding work plan
 
-Last updated: 2026-03-11 (after sticky vim-mode persistence slice)
+Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validation updates)
 
 ### Status key
 - `[x]` done
@@ -13,7 +13,7 @@ Last updated: 2026-03-11 (after sticky vim-mode persistence slice)
 - `[x]` Driver coverage for MSSQL / PostgreSQL / SQLite
 - `[x]` Schema introspection and schema-driven autocomplete seed data
 - `[x]` Workspace-backed query files, session restore, per-tab cursor restore, and sticky vim mode
-- `[~]` Editor roadmap: significant local work underway, including vim support
+- `[~]` Editor roadmap: major UX/tooling slices are now landed, including vim support, refactors, JOIN inference, query-block navigation, and schema-aware validation
 - `[x]` Configuration loader now extracts connections, editor, keys, theme, and startup settings from `config.lua`
 - `[x]` Saved/named connection flow is now wired for raw DSNs, config profiles, keychain-backed managed connections, and last-used named connection restore
 - `[~]` Connection surfaces now include a switcher palette and an in-app add-connection modal; general command palette work is still outstanding
@@ -47,9 +47,14 @@ Last updated: 2026-03-11 (after sticky vim-mode persistence slice)
 - `[ ]` Status bar updates for row count / duration / transaction state
 
 #### P1 — editor and query tooling gaps
-- `[ ]` Wire formatter into editor commands
-- `[ ]` Implement SELECT `*` expansion
-- `[ ]` Implement comment toggle
+- `[x]` Wire formatter into editor commands
+- `[x]` Implement SELECT `*` expansion
+- `[x]` Implement comment toggle
+- `[x]` Add an editor refactor transient popup on `Ctrl+R`, with `N` as a listed action for naming/aliasing the current table in the current query block and rewriting its matching references within that block only
+- `[x]` Add JOIN `ON`-clause autocomplete / inference so that after the user writes a `JOIN` and starts the `ON` section, the editor can suggest or insert the join predicate using schema metadata first and strong local clues second (naming patterns, existing aliases, nearby query context). Trigger this from typing `ON `, typing `=` after one side of a predicate, selecting a joined table in autocomplete, and similar join-context completions.
+- `[x]` Add `Ctrl+R` refactors for converting `SELECT` ↔ `UPDATE` and appending the opposite form beneath the active statement, including conservative join-aware handling
+- `[x]` Add `Alt+Up` / `Alt+Down` query-block navigation
+- `[x]` Highlight missing table/view names and missing qualified columns in red when schema metadata proves they do not exist
 - `[ ]` Finish query execution modes beyond current block/buffer behavior
 
 #### P2 — schema and results UX
@@ -74,7 +79,8 @@ Last updated: 2026-03-11 (after sticky vim-mode persistence slice)
 ### Immediate next step
 1. Build the command palette (`Ctrl+P`) on top of the new palette infrastructure.
 2. Then move to the history store + history palette (`Ctrl+H`).
-3. Keep updating this file after each completed slice.
+3. Then return to remaining execution workflow gaps and broader modal/palette flows.
+4. Keep updating this file after each completed slice.
 
 ### Progress log
 - `2026-03-11`: Created this plan and started work on the P0 saved/named connection slice.
@@ -86,3 +92,10 @@ Last updated: 2026-03-11 (after sticky vim-mode persistence slice)
 - `2026-03-11`: Added an in-app add-connection modal with Connect / Save / Save & Connect actions, wired to the same keychain-backed save path as the CLI; reachable via `Ctrl+N` outside the editor and from the connection switcher; added modal and app integration tests; verified with `go test ./...` and `go build ./...`.
 - `2026-03-11`: Added an `F1` help/settings overlay showing runtime keybindings, runtime state, and loaded config/theme/startup values with scroll support; also completed Lua config extraction for editor/keys/theme/startup so the displayed settings reflect actual loaded config values; added config, help, and app regression tests; verified with `go test ./...` and `go build ./...`.
 - `2026-03-11`: Persisted vim mode as a sticky workspace preference in `workspace/state.json`; toggling vim mode now saves immediately and startup restores it across launches independently of per-connection tab sessions; added workspace-state and app regression tests; verified with `go test ./...` and `go build ./...`.
+- `2026-03-11`: Updated the living plan after editor UX progress: formatter and line-comment toggle are now done, and added a planned transient editor refactor popup on `Ctrl+R`, including an `N` action that should alias the table under the cursor and rewrite references within the current query block only.
+- `2026-03-11`: Refined the planned JOIN tooling feature: instead of a standalone join-writer, the editor should offer `JOIN ... ON` autocomplete once the user is in the `ON` clause, inferring predicates from schema metadata first and strong local naming/context clues second within the current query block. Planned triggers include typing `ON `, typing `=` after one side of the join predicate, and join-related autocomplete selections.
+- `2026-03-11`: Implemented the first JOIN inference slice in the editor: when schema metadata is available, autocomplete now suggests join predicates after `ON `, suggests the matching RHS after `=`, and can auto-append `ON ...` after selecting a joined table completion when the inferred FK relation is unambiguous. This works in textarea and vim modes and includes conservative heuristic fallback from available schema column names.
+- `2026-03-11`: Implemented a transient editor refactor popup on `Ctrl+R`, including an `N` action that adds a short alias to the current table in the active query block and rewrites matching references in that block only, for both textarea and vim modes.
+- `2026-03-11`: Landed a broad editor UX/tooling pass: improved JOIN ranking and labels; added SQL Server FK introspection plus stronger heuristic matching for prefixed, underscored, and self-referential keys; fixed vim insert-mode `Delete`; added compact visually lighter JOIN popup details; and added `Alt+Up` / `Alt+Down` query-block navigation with robust first/last-block no-op behavior.
+- `2026-03-11`: Added conservative schema-aware validation/highlighting in the editor so missing table/view names and missing qualified columns render in an error color when loaded schema metadata proves they do not exist.
+- `2026-03-11`: Expanded the editor refactor popup with `E` to expand top-level `SELECT *`, and with `u` / `U` / `s` / `S` to convert between `SELECT` and `UPDATE` statements or append the opposite form beneath the active block. The new `SELECT → UPDATE` path preserves `FROM` / `JOIN` / `WHERE` structure conservatively for joined statements and only scaffolds `SET` entries for the target table.

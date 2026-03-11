@@ -134,7 +134,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SchemaLoadedMsg:
 		m.schema = m.schema.SetSchema(msg.Schema, msg.ConnName)
-		m.editor = m.editor.SetSchemaCompletions(schemaCompletions(msg.Schema))
+		m.editor = m.editor.SetSchema(msg.Schema).SetSchemaCompletions(schemaCompletions(msg.Schema))
 		return m, nil
 
 	case editor.NewTabMsg:
@@ -385,20 +385,26 @@ func (m Model) routeToFocused(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
-		return m, nil
-	}
 	layout := m.layoutMetrics()
 	if layout.contentW <= 0 {
+		return m, nil
+	}
+	contentX := 0
+	if m.schemaOpen {
+		contentX = layout.schemaW
+	}
+	if m.editor.MouseSelecting() && (msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease) {
+		localX, localY := clampMouseToEditor(contentX, layout, msg.X, msg.Y)
+		m.editor = m.editor.Mouse(msg, localX, localY)
+		m.statusbar = m.statusbar.SetVimMode(m.editor.VimMode())
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
 	if m.schemaOpen && msg.X < layout.schemaW && msg.Y >= 0 && msg.Y < m.height-1 {
 		nm, cmd := m.applyPaneFocus(PaneSchema)
 		return nm, cmd
-	}
-	contentX := 0
-	if m.schemaOpen {
-		contentX = layout.schemaW
 	}
 	if msg.X < contentX || msg.X >= contentX+layout.contentW || msg.Y < 0 {
 		return m, nil
@@ -406,13 +412,20 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	localX := msg.X - contentX
 	if msg.Y < layout.editorH {
 		nm, cmd := m.applyPaneFocus(PaneEditor)
-		nm.editor = nm.editor.Click(localX, msg.Y)
+		nm.editor = nm.editor.Mouse(msg, localX, msg.Y)
+		nm.statusbar = nm.statusbar.SetVimMode(nm.editor.VimMode())
 		return nm, cmd
 	}
 	if msg.Y > layout.editorH && msg.Y < layout.editorH+1+layout.resultsH {
 		return m.applyPaneFocus(PaneResults)
 	}
 	return m, nil
+}
+
+func clampMouseToEditor(contentX int, layout paneLayout, x, y int) (int, int) {
+	localX := clampInt(x-contentX, 0, maxInt(0, layout.contentW-1))
+	localY := clampInt(y, 1, maxInt(1, layout.editorH-1))
+	return localX, localY
 }
 
 // applySize distributes terminal dimensions to all sub-models.
@@ -475,6 +488,23 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // connectCmd returns a tea.Cmd that opens a DB connection.

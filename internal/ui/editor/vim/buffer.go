@@ -228,6 +228,31 @@ func (b *Buffer) DeleteCharBefore() {
 	}
 }
 
+// DeleteCharAtCursor deletes the character at the insert-mode cursor.
+// If the cursor is at end-of-line, it joins with the next line.
+func (b *Buffer) DeleteCharAtCursor() {
+	row, col := b.row, b.col
+	line := b.lines[row]
+	if col < len(line) {
+		newLine := make([]rune, len(line)-1)
+		copy(newLine, line[:col])
+		copy(newLine[col:], line[col+1:])
+		b.lines[row] = newLine
+		return
+	}
+	if row >= len(b.lines)-1 {
+		return
+	}
+	nextLine := b.lines[row+1]
+	joined := append(append([]rune{}, line...), nextLine...)
+	newLines := make([][]rune, len(b.lines)-1)
+	copy(newLines, b.lines[:row])
+	newLines[row] = joined
+	copy(newLines[row+1:], b.lines[row+2:])
+	b.lines = newLines
+	b.clampInsert()
+}
+
 // ─── Normal-mode operations ───────────────────────────────────────────────────
 
 // OpenLineBelow inserts a blank line after the cursor row and moves there.

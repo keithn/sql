@@ -279,6 +279,18 @@ func TestF1OpensAndClosesHelpScreen(t *testing.T) {
 	if !strings.Contains(view, "Help & Settings") || !strings.Contains(view, "Ctrl+K") {
 		t.Fatalf("help view should contain title, bindings, and current settings; got %q", view)
 	}
+	if !helpSectionsContain(m.helpSections(), "Ctrl+\\") {
+		t.Fatalf("help sections should include the updated comment shortcut")
+	}
+	if !helpSectionsContain(m.helpSections(), "Ctrl+Shift+F / Ctrl+F") {
+		t.Fatalf("help sections should include the active-block format shortcut")
+	}
+	if !helpSectionsContain(m.helpSections(), "Ctrl+R") {
+		t.Fatalf("help sections should include the refactor popup shortcut")
+	}
+	if !helpSectionsContain(m.helpSections(), "Alt+Up / Alt+Down") {
+		t.Fatalf("help sections should include the query-block navigation shortcut")
+	}
 	if !helpSectionsContain(m.helpSections(), "tab_size=4") {
 		t.Fatalf("help sections should include current editor settings")
 	}
@@ -388,17 +400,51 @@ func TestMouseClickFocusesSchemaPaneWhenOpen(t *testing.T) {
 	}
 }
 
-func TestCtrlUnderscoreRoutesToEditorCommentShortcut(t *testing.T) {
+func TestMouseDragSelectsEditorTextThroughAppRouting(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dataHome)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	m := New(&config.Config{Editor: config.EditorConfig{VimMode: false}}, "")
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = nm.(Model)
+	m.editor = m.editor.SetTabs([]editor.TabState{{Path: "query1.sql", Content: "hello world"}})
+	m.focused = PaneEditor
+
+	press := tea.MouseMsg{X: 0, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+	motion := tea.MouseMsg{X: 5, Y: 1, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft}
+	release := tea.MouseMsg{X: 5, Y: 1, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+
+	nm, _ = m.Update(press)
+	m = nm.(Model)
+	if m.focused != PaneEditor {
+		t.Fatalf("focused pane after editor drag press = %v, want %v", m.focused, PaneEditor)
+	}
+	if !m.editor.MouseSelecting() {
+		t.Fatalf("editor should enter mouse-selecting state after press")
+	}
+	nm, _ = m.Update(motion)
+	m = nm.(Model)
+	if !m.editor.MouseSelecting() {
+		t.Fatalf("editor should remain mouse-selecting during drag motion")
+	}
+	nm, _ = m.Update(release)
+	m = nm.(Model)
+	if m.editor.MouseSelecting() {
+		t.Fatalf("editor mouse-selecting state should clear on release")
+	}
+}
+
+func TestCtrlBackslashRoutesToEditorCommentShortcut(t *testing.T) {
 	m := New(&config.Config{}, "")
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = nm.(Model)
 	m.editor = m.editor.SetTabs([]editor.TabState{{Path: "query1.sql", Content: "select 1\nselect 2"}})
 	m.focused = PaneEditor
 
-	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlUnderscore})
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlBackslash})
 	m = nm.(Model)
 	if got := m.editor.Value(); got != "-- select 1\nselect 2" {
-		t.Fatalf("editor value after KeyCtrlUnderscore = %q, want first line commented", got)
+		t.Fatalf("editor value after KeyCtrlBackslash = %q, want first line commented", got)
 	}
 }
 

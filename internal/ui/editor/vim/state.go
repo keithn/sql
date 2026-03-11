@@ -25,6 +25,19 @@ func (m Mode) String() string {
 	}
 }
 
+// Snapshot captures enough vim state to restore a tab after a temporary mode
+// toggle away from vim.
+type Snapshot struct {
+	Cursor        Pos
+	Mode          Mode
+	Anchor        Pos
+	TopRow        int
+	CountStr      string
+	Operator      rune
+	OperatorCount int
+	PendingG      bool
+}
+
 // State is the per-tab vim key-input state machine.
 type State struct {
 	Mode Mode
@@ -63,6 +76,45 @@ func NewState() *State {
 func (s *State) SetSize(w, h int) {
 	s.width = w
 	s.height = h
+}
+
+// Snapshot returns the current vim state for round-trip restoration.
+func (s *State) Snapshot() Snapshot {
+	if s == nil || s.Buf == nil {
+		return Snapshot{}
+	}
+	return Snapshot{
+		Cursor:        Pos{Row: s.Buf.row, Col: s.Buf.col},
+		Mode:          s.Mode,
+		Anchor:        s.Anchor,
+		TopRow:        s.TopRow,
+		CountStr:      s.countStr,
+		Operator:      s.operator,
+		OperatorCount: s.operatorCount,
+		PendingG:      s.pendingG,
+	}
+}
+
+// RestoreSnapshot restores previously captured vim state.
+func (s *State) RestoreSnapshot(snapshot Snapshot) {
+	if s == nil || s.Buf == nil {
+		return
+	}
+	s.Buf.SetCursor(snapshot.Cursor.Row, snapshot.Cursor.Col)
+	s.Mode = snapshot.Mode
+	s.Anchor = clampPosToBuffer(s.Buf, snapshot.Anchor)
+	s.TopRow = snapshot.TopRow
+	if s.TopRow < 0 {
+		s.TopRow = 0
+	}
+	maxTop := max(0, s.Buf.LineCount()-1)
+	if s.TopRow > maxTop {
+		s.TopRow = maxTop
+	}
+	s.countStr = snapshot.CountStr
+	s.operator = snapshot.Operator
+	s.operatorCount = snapshot.OperatorCount
+	s.pendingG = snapshot.PendingG
 }
 
 // ModeString returns the mode label for the status bar.
@@ -483,6 +535,8 @@ func (s *State) handleInsert(key string) bool {
 		}
 	case "backspace", "ctrl+h":
 		s.Buf.DeleteCharBefore()
+	case "delete":
+		s.Buf.DeleteCharAtCursor()
 	case "enter":
 		s.Buf.InsertNewline()
 	case "left":
@@ -626,4 +680,24 @@ func (s *State) handleVisual(key string) bool {
 
 func isCtrl(r rune) bool {
 	return r < 32 || r == 127
+}
+
+func clampPosToBuffer(buf *Buffer, pos Pos) Pos {
+	if buf == nil || buf.LineCount() == 0 {
+		return Pos{}
+	}
+	if pos.Row < 0 {
+		pos.Row = 0
+	}
+	if pos.Row >= buf.LineCount() {
+		pos.Row = buf.LineCount() - 1
+	}
+	lineLen := len(buf.Line(pos.Row))
+	if pos.Col < 0 {
+		pos.Col = 0
+	}
+	if pos.Col > lineLen {
+		pos.Col = lineLen
+	}
+	return pos
 }

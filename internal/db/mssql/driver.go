@@ -173,6 +173,71 @@ WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'`)
 		colMap[ck] = cols
 	}
 
+	// Fetch foreign keys keyed by source schema/table/column.
+	type fkKey struct {
+		schema string
+		table  string
+		column string
+	}
+	fkMap := make(map[fkKey]db.ForeignKey)
+
+	fkRows, err := conn.QueryContext(ctx, `
+SELECT
+	ps.name AS parent_schema,
+	pt.name AS parent_table,
+	pc.name AS parent_column,
+	rs.name AS referenced_schema,
+	rt.name AS referenced_table,
+	rc.name AS referenced_column
+FROM sys.foreign_key_columns fkc
+JOIN sys.tables pt
+	ON fkc.parent_object_id = pt.object_id
+JOIN sys.schemas ps
+	ON pt.schema_id = ps.schema_id
+JOIN sys.columns pc
+	ON fkc.parent_object_id = pc.object_id
+	AND fkc.parent_column_id = pc.column_id
+JOIN sys.tables rt
+	ON fkc.referenced_object_id = rt.object_id
+JOIN sys.schemas rs
+	ON rt.schema_id = rs.schema_id
+JOIN sys.columns rc
+	ON fkc.referenced_object_id = rc.object_id
+	AND fkc.referenced_column_id = rc.column_id
+ORDER BY ps.name, pt.name, fkc.constraint_column_id`)
+	if err != nil {
+		return nil, fmt.Errorf("mssql: introspect fks: %w", err)
+	}
+	defer fkRows.Close()
+	for fkRows.Next() {
+		var parentSchema, parentTable, parentColumn, refSchema, refTable, refColumn string
+		if err := fkRows.Scan(&parentSchema, &parentTable, &parentColumn, &refSchema, &refTable, &refColumn); err != nil {
+			return nil, fmt.Errorf("mssql: introspect fks scan: %w", err)
+		}
+		refName := refTable
+		if refSchema != "" {
+			refName = refSchema + "." + refTable
+		}
+		fkMap[fkKey{schema: parentSchema, table: parentTable, column: parentColumn}] = db.ForeignKey{
+			RefTable:  refName,
+			RefColumn: refColumn,
+		}
+	}
+	if err := fkRows.Err(); err != nil {
+		return nil, fmt.Errorf("mssql: introspect fks rows: %w", err)
+	}
+
+	// Apply foreign key metadata to columns.
+	for ck, cols := range colMap {
+		for i, col := range cols {
+			if fk, ok := fkMap[fkKey{schema: ck.schema, table: ck.table, column: col.Name}]; ok {
+				fkCopy := fk
+				cols[i].ForeignKey = &fkCopy
+			}
+		}
+		colMap[ck] = cols
+	}
+
 	// Build schema nodes grouped by TABLE_SCHEMA.
 	schemaMap := make(map[string]*db.SchemaNode)
 	schemaOrder := []string{}

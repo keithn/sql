@@ -32,11 +32,12 @@ func TestRenderPopupShowsKindLabels(t *testing.T) {
 	m := New(testConfig())
 	m.popup = completionPopup{
 		visible: true,
-		items: []CompletionItem{
+		items: popupItemsFromCompletions([]CompletionItem{
 			{Text: "SELECT", Kind: CompletionKindKeyword},
 			{Text: "users", Kind: CompletionKindTable},
 			{Text: "email", Kind: CompletionKindColumn},
-		},
+		}),
+		mode: popupModeCompletion,
 	}
 	view := ansi.Strip(m.renderPopup())
 	for _, want := range []string{"SELECT", "[keyword]", "users", "[table]", "email", "[column]"} {

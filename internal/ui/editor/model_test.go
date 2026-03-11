@@ -1,12 +1,16 @@
 package editor
 
 import (
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sqltui/sql/internal/config"
+	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/ui/editor/vim"
 )
 
@@ -57,6 +61,723 @@ func TestDetectBlockRangeOnBlankLineHasNoActiveBlock(t *testing.T) {
 	if got := detectBlock(text, 2); got != "" {
 		t.Fatalf("detectBlock() = %q, want empty on second blank separator line", got)
 	}
+}
+
+func TestUpdateCtrlROpensRefactorPopup(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 16)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+
+	if !m.popup.visible || m.popup.mode != popupModeRefactor {
+		t.Fatalf("expected visible refactor popup after ctrl+r")
+	}
+	if got := ansi.Strip(m.renderPopup()); !strings.Contains(got, "Name table alias") || !strings.Contains(got, "Expand *") || !strings.Contains(got, "Convert SELECT to UPDATE") || !strings.Contains(got, "Add UPDATE below") || !strings.Contains(got, "Convert UPDATE to SELECT") || !strings.Contains(got, "Add SELECT below") || !strings.Contains(got, "u") || !strings.Contains(got, "U") || !strings.Contains(got, "s") || !strings.Contains(got, "S") {
+		t.Fatalf("refactor popup render = %q, want alias/expand/select-update actions with shortcuts", got)
+	}
+}
+
+func TestRenderPopupStylesCompletionDetailSeparately(t *testing.T) {
+	m := New(testConfig())
+	m.popup = completionPopup{
+		visible:  true,
+		mode:     popupModeCompletion,
+		selected: 0,
+		items: []popupItem{{
+			Text:   "O.lngClientID = C.lngClientID",
+			Kind:   CompletionKindName,
+			Detail: "pred · heur",
+		}},
+	}
+
+	raw := m.renderPopup()
+	if got := ansi.Strip(raw); !strings.Contains(got, "pred · heur") {
+		t.Fatalf("stripped popup render = %q, want detail text present", got)
+	}
+	if !strings.Contains(raw, popupSelectedDetailStyle.Render("  pred · heur")) {
+		t.Fatalf("popup render should style detail with selected detail style; raw = %q", raw)
+	}
+}
+
+func TestUpdateCtrlRThenNAliasesCurrentBlockOnly(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 1\n\nselect tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 2",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 7)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = nm
+
+	want := "select U.Name\nfrom tblUser U\nwhere U.Id = 1\n\nselect tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 2"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after applying action")
+	}
+}
+
+func TestUpdateCtrlRThenNVimAliasesCurrentBlockOnly(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 1\n\nselect tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 2",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(1, 7)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = nm
+
+	want := "select U.Name\nfrom tblUser U\nwhere U.Id = 1\n\nselect tblUser.Name\nfrom tblUser\nwhere tblUser.Id = 2"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after applying action in vim mode")
+	}
+}
+
+func TestUpdateCtrlRThenEExpandsSelectStarCurrentBlockOnly(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select *\nfrom tblUser\nwhere Id = 1\n\nselect *\nfrom tblUser",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 6)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = nm
+
+	want := "select Id, Name\nfrom tblUser\nwhere Id = 1\n\nselect *\nfrom tblUser"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after expand-star refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after expand-star action")
+	}
+}
+
+func TestUpdateCtrlRThenEExpandsJoinStarUsingAliases(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select *\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 8)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = nm
+
+	want := "select U.Id, U.Name, O.Id, O.UserId\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join expand-star refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenEVimExpandsSelectStarCurrentBlockOnly(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select *\nfrom tblUser\nwhere Id = 1\n\nselect *\nfrom tblUser",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(1, 6)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = nm
+
+	want := "select Id, Name\nfrom tblUser\nwhere Id = 1\n\nselect *\nfrom tblUser"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after expand-star refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after expand-star action in vim mode")
+	}
+}
+
+func TestUpdateCtrlRThenuConvertsJoinedSelectToUpdate(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select U.Id, U.Name, O.UserId\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 9)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm
+
+	want := "UPDATE U\nSET\n    Id = U.Id,\n    Name = U.Name\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after select->update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenuConvertsSelectStarToUpdateUsingSchema(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select *\nfrom tblUser\nwhere Name like '%keith%'",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 8)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm
+
+	want := "UPDATE tblUser\nSET\n    Id = Id,\n    Name = Name\nwhere Name like '%keith%'"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after select-star -> update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenuConvertsQualifiedTargetStarToJoinedUpdateUsingSchema(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select U.*\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 9)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm
+
+	want := "UPDATE U\nSET\n    Id = U.Id,\n    Name = U.Name\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after qualified-star select->update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenUAppendsUpdateBelowSelect(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select Id, Name\nfrom tblUser\nwhere Id = 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 4)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'U'}})
+	m = nm
+
+	want := "select Id, Name\nfrom tblUser\nwhere Id = 1\n\nUPDATE tblUser\nSET\n    Id = Id,\n    Name = Name\nwhere Id = 1"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after append-update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThensConvertsJoinedUpdateToSelect(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "update U\nset U.Name = 'alice', U.Id = U.Id\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 6)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = nm
+
+	want := "SELECT U.Name, U.Id\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after update->select refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenSAppendsSelectBelowUpdate(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "update tblUser\nset Name = 'alice'\nwhere Id = 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 4)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m = nm
+
+	want := "update tblUser\nset Name = 'alice'\nwhere Id = 1\n\nSELECT Name\nFROM tblUser\nwhere Id = 1"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after append-select refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenuVimConvertsJoinedSelectToUpdate(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select U.Id, U.Name, O.UserId\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(0, 9)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm
+
+	want := "UPDATE U\nSET\n    Id = U.Id,\n    Name = U.Name\nfrom tblUser U\njoin tblOrder O on U.Id = O.UserId\nwhere O.Id = 1"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after select->update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRThenuVimConvertsSelectStarToUpdateUsingSchema(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select *\nfrom tblUser\nwhere Name like '%keith%'",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(0, 8)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = nm
+
+	want := "UPDATE tblUser\nSET\n    Id = Id,\n    Name = Name\nwhere Name like '%keith%'"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after select-star -> update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdatePopupShowsJoinPredicateSuggestionsAfterOn(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrder O on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblUser U join tblOrder O on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join popup after ON clause")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].InsertText != "U.Id = O.UserId" {
+		t.Fatalf("join popup first item = %#v, want inferred FK predicate", m.popup.items)
+	}
+}
+
+func TestUpdatePopupShowsJoinPredicateSuggestionsForMSSQLForeignKeyNames(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMSSQLForeignKeySchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblLogger L on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblLogger L on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join popup after ON clause")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].InsertText != "O.lngLoggerID = L.lngLoggerID" {
+		t.Fatalf("join popup first item = %#v, want lngLoggerID FK predicate", m.popup.items)
+	}
+	if got := m.popup.items[0].Detail; got != "pred · fk" {
+		t.Fatalf("join popup detail = %q, want pred · fk", got)
+	}
+}
+
+func TestUpdatePopupShowsJoinPredicateSuggestionsForHungarianHeuristicNames(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinClientHungarianHeuristicSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblClient C on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblClient C on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join popup after ON clause")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].InsertText != "O.lngClientID = C.lngClientID" {
+		t.Fatalf("join popup first item = %#v, want lngClientID heuristic predicate", m.popup.items)
+	}
+	if got := m.popup.items[0].Detail; got != "pred · heur" {
+		t.Fatalf("join popup detail = %q, want pred · heur", got)
+	}
+}
+
+func TestUpdatePopupShowsJoinPredicateSuggestionsForUnderscoreHeuristicNames(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinClientUnderscoreHeuristicSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOrderSummary S inner join tblClient C on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOrderSummary S inner join tblClient C on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join popup after ON clause")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].InsertText != "S.Client_id = C.lngClientID" {
+		t.Fatalf("join popup first item = %#v, want Client_id heuristic predicate", m.popup.items)
+	}
+}
+
+func TestUpdatePopupShowsJoinPredicateSuggestionsAfterOnQualifiedPrefix(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMSSQLForeignKeySchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblLogger L on O."}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblLogger L on O."))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join popup after ON qualified prefix")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].InsertText != "lngLoggerID = L.lngLoggerID" {
+		t.Fatalf("join popup first item = %#v, want suffix completion after O.", m.popup.items)
+	}
+	if got := m.popup.items[0].Detail; got != "lhs · fk" {
+		t.Fatalf("join popup detail = %q, want lhs · fk", got)
+	}
+}
+
+func TestJoinPredicateRankingPrefersMostRecentMatchingTable(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinRankingTestSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblAccount A join tblZoo Z on 1 = 1 join tblTask T on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblAccount A join tblZoo Z on 1 = 1 join tblTask T on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible || len(m.popup.items) < 2 {
+		t.Fatalf("expected multiple ranked join suggestions, got %#v", m.popup.items)
+	}
+	if got := m.popup.items[0].InsertText; got != "Z.Id = T.ZooId" {
+		t.Fatalf("top-ranked join predicate = %q, want most recent-table relation first", got)
+	}
+	if got := m.popup.items[1].InsertText; got != "A.Id = T.AccountId" {
+		t.Fatalf("second-ranked join predicate = %q, want earlier-table relation second", got)
+	}
+}
+
+func TestAcceptJoinCompletionAfterOnInsertsPredicateTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrder O on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblUser U join tblOrder O on "))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblUser U join tblOrder O on U.Id = O.UserId"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join completion = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptJoinCompletionAfterOnWithoutTrailingSpaceAddsSpaceTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrder O on"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblUser U join tblOrder O on"))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblUser U join tblOrder O on U.Id = O.UserId"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join completion without trailing ON space = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptJoinCompletionAfterOnQualifiedPrefixCompletesPredicateTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMSSQLForeignKeySchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblLogger L on O."}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblLogger L on O."))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblOutpost O inner join tblLogger L on O.lngLoggerID = L.lngLoggerID"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join completion from O. prefix = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptJoinCompletionForSelfReferentialParentHeuristicTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinClientSelfReferenceSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblClient Parent inner join tblClient Child on Child."}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblClient Parent inner join tblClient Child on Child."))
+	m.updatePopup()
+	if !m.popup.visible || len(m.popup.items) == 0 {
+		t.Fatalf("expected self-referential join popup")
+	}
+	if got := m.popup.items[0].Detail; got != "rhs · self" {
+		t.Fatalf("join popup detail = %q, want rhs · self", got)
+	}
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblClient Parent inner join tblClient Child on Child.lngParentID = Parent.lngClientID"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after self-referential join completion = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptJoinCompletionAfterOnPartialColumnPrefixKeepsTypedPrefixTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMSSQLForeignKeySchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblLogger L on O.lng"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblLogger L on O.lng"))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblOutpost O inner join tblLogger L on O.lngLoggerID = L.lngLoggerID"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join completion from O.lng prefix = %q, want %q", got, want)
+	}
+}
+
+func TestUpdatePopupShowsJoinRHSSuggestionsAfterEquals(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrder O on U.Id ="}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblUser U join tblOrder O on U.Id ="))
+
+	m.updatePopup()
+
+	if !m.popup.visible {
+		t.Fatalf("expected join RHS popup after equals")
+	}
+	if len(m.popup.items) == 0 || m.popup.items[0].Text != "O.UserId" {
+		t.Fatalf("join RHS popup first item = %#v, want O.UserId", m.popup.items)
+	}
+	if m.popup.items[0].InsertText != " O.UserId" {
+		t.Fatalf("join RHS popup insert text = %q, want leading-space RHS insertion", m.popup.items[0].InsertText)
+	}
+	if got := m.popup.items[0].Detail; got != "rhs · fk" {
+		t.Fatalf("join RHS popup detail = %q, want rhs · fk", got)
+	}
+}
+
+func TestAcceptJoinCompletionAfterPartialRHSPrefixKeepsCurrentPredicateTextarea(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMSSQLForeignKeySchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblOutpost O inner join tblLogger L on O.lngLoggerID = L.lngLogger"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblOutpost O inner join tblLogger L on O.lngLoggerID = L.lngLogger"))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblOutpost O inner join tblLogger L on O.lngLoggerID = L.lngLoggerID"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after join completion from RHS prefix = %q, want %q", got, want)
+	}
+}
+
+func TestJoinPredicateRankingPrefersExplicitFKOverRecentHeuristic(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinMixedRankingTestSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblAccount A join tblZoo Z on 1 = 1 join tblTask T on "}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblAccount A join tblZoo Z on 1 = 1 join tblTask T on "))
+
+	m.updatePopup()
+
+	if !m.popup.visible || len(m.popup.items) < 2 {
+		t.Fatalf("expected multiple ranked join suggestions, got %#v", m.popup.items)
+	}
+	if got := m.popup.items[0].InsertText; got != "A.Id = T.AccountId" {
+		t.Fatalf("top-ranked join predicate = %q, want explicit FK before heuristic", got)
+	}
+	if got := m.popup.items[1].InsertText; got != "Z.Id = T.ZooId" {
+		t.Fatalf("second-ranked join predicate = %q, want heuristic suggestion after explicit FK", got)
+	}
+}
+
+func TestAcceptTableCompletionAutoAppendsJoinOnUniqueFK(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSchemaCompletions([]CompletionItem{{Text: "tblOrder", Kind: CompletionKindTable}})
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrd"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("select * from tblUser U join tblOrd"))
+	m.updatePopup()
+
+	m = m.acceptCompletion()
+
+	want := "select * from tblUser U join tblOrder ON U.Id = tblOrder.UserId"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after table completion join follow-up = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptJoinCompletionAfterOnInsertsPredicateVim(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUser U join tblOrder O on "}})
+	m.tabs[0].vim.HandleKey("A")
+	m.updatePopupVim()
+
+	m = m.acceptCompletionVim()
+
+	want := "select * from tblUser U join tblOrder O on U.Id = O.UserId"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after join completion = %q, want %q", got, want)
+	}
+}
+
+func TestVimInsertDeleteDeletesCharUnderCursorAndClosesPopup(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSchemaCompletions([]CompletionItem{{Text: "tblUser", Kind: CompletionKindTable}})
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select * from tblUseX"}})
+	m.tabs[0].vim.Buf.SetCursor(0, len("select * from tblUse"))
+	m.tabs[0].vim.HandleKey("i")
+	m.updatePopupVim()
+	if !m.popup.visible {
+		t.Fatalf("expected popup before delete in vim insert mode")
+	}
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	m = nm
+
+	if got := m.tabs[0].vim.Buf.Value(); got != "select * from tblUse" {
+		t.Fatalf("vim value after delete = %q, want deleted char under insert cursor", got)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close on vim insert delete")
+	}
+	if got := m.tabs[0].vim.Mode; got != vim.ModeInsert {
+		t.Fatalf("vim mode after delete = %v, want %v", got, vim.ModeInsert)
+	}
+}
+
+func joinInferenceTestSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "testdb",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblUser", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}, {Name: "Name"}}},
+				{Name: "tblOrder", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}, {Name: "UserId", ForeignKey: &db.ForeignKey{RefTable: "tblUser", RefColumn: "Id"}}}},
+			},
+		}},
+	}}}
+}
+
+func joinMSSQLForeignKeySchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "ActivePLC",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblLogger", Columns: []db.ColumnDef{{Name: "lngLoggerID", PrimaryKey: true}, {Name: "strName"}}},
+				{Name: "tblOutpost", Columns: []db.ColumnDef{{Name: "lngOutpostID", PrimaryKey: true}, {Name: "lngLoggerID", ForeignKey: &db.ForeignKey{RefTable: "dbo.tblLogger", RefColumn: "lngLoggerID"}}}},
+			},
+		}},
+	}}}
+}
+
+func joinClientHungarianHeuristicSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "ActivePLC",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblClient", Columns: []db.ColumnDef{{Name: "lngClientID", PrimaryKey: true}, {Name: "strClientName"}}},
+				{Name: "tblOutpost", Columns: []db.ColumnDef{{Name: "lngOutpostID", PrimaryKey: true}, {Name: "lngClientID"}}},
+			},
+		}},
+	}}}
+}
+
+func joinClientUnderscoreHeuristicSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "ActivePLC",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblClient", Columns: []db.ColumnDef{{Name: "lngClientID", PrimaryKey: true}, {Name: "strClientName"}}},
+				{Name: "tblOrderSummary", Columns: []db.ColumnDef{{Name: "lngOrderSummaryID", PrimaryKey: true}, {Name: "Client_id"}}},
+			},
+		}},
+	}}}
+}
+
+func joinClientSelfReferenceSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "ActivePLC",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblClient", Columns: []db.ColumnDef{{Name: "lngClientID", PrimaryKey: true}, {Name: "lngParentID"}, {Name: "strClientName"}}},
+			},
+		}},
+	}}}
+}
+
+func joinRankingTestSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "testdb",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblAccount", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}}},
+				{Name: "tblZoo", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}}},
+				{Name: "tblTask", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}, {Name: "AccountId", ForeignKey: &db.ForeignKey{RefTable: "tblAccount", RefColumn: "Id"}}, {Name: "ZooId", ForeignKey: &db.ForeignKey{RefTable: "tblZoo", RefColumn: "Id"}}}},
+			},
+		}},
+	}}}
+}
+
+func joinMixedRankingTestSchema() *db.Schema {
+	return &db.Schema{Databases: []db.Database{{
+		Name: "testdb",
+		Schemas: []db.SchemaNode{{
+			Name: "dbo",
+			Tables: []db.Table{
+				{Name: "tblAccount", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}}},
+				{Name: "tblZoo", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}}},
+				{Name: "tblTask", Columns: []db.ColumnDef{{Name: "Id", PrimaryKey: true}, {Name: "AccountId", ForeignKey: &db.ForeignKey{RefTable: "tblAccount", RefColumn: "Id"}}, {Name: "ZooId"}}},
+			},
+		}},
+	}}}
 }
 
 func TestSetTabsRestoresTextareaCursorPosition(t *testing.T) {
@@ -183,6 +904,168 @@ func TestToggleVimPreservesInactiveTabCursorPositions(t *testing.T) {
 	}
 }
 
+func TestIsFormatShortcutNormalizesCtrlShiftLetter(t *testing.T) {
+	m := New(testConfig())
+	if !m.isFormatShortcut(tea.KeyMsg{Type: tea.KeyCtrlF}) {
+		t.Fatalf("expected ctrl+f to match configured ctrl+shift+f shortcut")
+	}
+}
+
+func TestFormatActiveBlockTextareaShortcutFormatsOnlyCurrentBlock(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select 1\n\nselect id, name from users where active = 1 and role = 'admin'",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 2, 0)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = nm
+
+	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1\n  AND role = 'admin'"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after format = %q, want %q", got, want)
+	}
+}
+
+func TestFormatActiveBlockVimShortcutFormatsOnlyCurrentBlock(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select 1\n\nselect id, name from users where active = 1 and role = 'admin'",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(2, 0)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = nm
+
+	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1\n  AND role = 'admin'"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after format = %q, want %q", got, want)
+	}
+}
+
+func TestFormatActiveBlockOnBlankLineFormatsPreviousBlock(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select 1\n\nselect 2",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 0)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = nm
+
+	if got := m.tabs[0].ta.Value(); got != "SELECT 1\n\nselect 2" {
+		t.Fatalf("blank-line format should affect previous block, got %q", got)
+	}
+}
+
+func TestFormatActiveBlockOnLeadingBlankLineIsNoOp(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "\nselect 1",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 0)
+	before := m.tabs[0].ta.Value()
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = nm
+
+	if got := m.tabs[0].ta.Value(); got != before {
+		t.Fatalf("leading blank-line format should be no-op, got %q want %q", got, before)
+	}
+}
+
+func TestToggleVimRestoresTextareaSelectionOnRoundTrip(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "alpha bravo"}})
+	m.tabs[0].selection = textareaSelection{Active: true, Anchor: textPos{Line: 0, Col: 0}}
+	setTextareaCursor(&m.tabs[0].ta, 0, 5)
+
+	m = m.ToggleVim()
+	m = m.ToggleVim()
+
+	start, end, ok := m.textareaSelectionRange()
+	if !ok {
+		t.Fatalf("expected textarea selection after vim round trip")
+	}
+	if start != (textPos{Line: 0, Col: 0}) || end != (textPos{Line: 0, Col: 5}) {
+		t.Fatalf("selection after round trip = (%+v,%+v), want [(0,0),(0,5)]", start, end)
+	}
+}
+
+func TestToggleVimRestoresTextareaScrollOnRoundTrip(t *testing.T) {
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("select %d;", i)
+	}
+	m := New(testConfig())
+	m = m.SetSize(80, 6)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: strings.Join(lines, "\n")}})
+
+	wantOffset := textareaViewportOffsetForSourceLine(&m.tabs[0].ta, 10)
+	setTextareaViewportYOffset(&m.tabs[0].ta, wantOffset)
+
+	m = m.ToggleVim()
+	if got := m.tabs[0].vim.TopRow; got != 10 {
+		t.Fatalf("vim top row after toggle = %d, want 10", got)
+	}
+	m = m.ToggleVim()
+
+	if got := textareaViewportYOffset(&m.tabs[0].ta); got != wantOffset {
+		t.Fatalf("textarea viewport offset after round trip = %d, want %d", got, wantOffset)
+	}
+}
+
+func TestToggleVimCarriesCurrentVimScrollIntoTextarea(t *testing.T) {
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("select %d;", i)
+	}
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 6)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: strings.Join(lines, "\n")}})
+	m.tabs[0].vim.TopRow = 12
+	m.tabs[0].vim.Buf.SetCursor(12, 0)
+
+	m = m.ToggleVim()
+	if got := textareaSourceLineForViewportOffset(&m.tabs[0].ta, textareaViewportYOffset(&m.tabs[0].ta)); got != 12 {
+		t.Fatalf("textarea top source line after vim toggle = %d, want 12", got)
+	}
+}
+
+func TestToggleVimRestoresVimModeStateOnRoundTrip(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\nselect 2;\nselect 3;\nselect 4;"}})
+	m.tabs[0].vim.Mode = vim.ModeInsert
+	m.tabs[0].vim.TopRow = 2
+	m.tabs[0].vim.Buf.SetCursor(2, 4)
+
+	m = m.ToggleVim()
+	m = m.ToggleVim()
+
+	if got := m.tabs[0].vim.Mode; got != vim.ModeInsert {
+		t.Fatalf("vim mode after round trip = %v, want %v", got, vim.ModeInsert)
+	}
+	if got := m.tabs[0].vim.TopRow; got != 2 {
+		t.Fatalf("vim top row after round trip = %d, want 2", got)
+	}
+}
+
 func TestBlockRangeAtCursorUsesTextareaCursor(t *testing.T) {
 	m := New(testConfig())
 	m = m.SetSize(80, 10)
@@ -215,6 +1098,155 @@ func TestBlockRangeAtCursorUsesVimCursor(t *testing.T) {
 	}
 }
 
+func TestAdjacentBlockLineFindsPreviousAndNextBlocks(t *testing.T) {
+	text := "select 1;\n\nselect\n  2\nfrom dual;\n\nselect 3;"
+	if got, ok := adjacentBlockLine(text, 3, -1); !ok || got != 0 {
+		t.Fatalf("adjacentBlockLine(..., up) = (%d,%v), want (0,true)", got, ok)
+	}
+	if got, ok := adjacentBlockLine(text, 3, 1); !ok || got != 6 {
+		t.Fatalf("adjacentBlockLine(..., down) = (%d,%v), want (6,true)", got, ok)
+	}
+	if _, ok := adjacentBlockLine(text, 6, 1); ok {
+		t.Fatalf("adjacentBlockLine() from last block should have no next block")
+	}
+	if got, ok := adjacentBlockLine(text, 1, 1); !ok || got != 2 {
+		t.Fatalf("adjacentBlockLine() from separator line down = (%d,%v), want (2,true)", got, ok)
+	}
+}
+
+func TestAltDownMovesTextareaCursorToNextQueryBlock(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect\n  22\nfrom dual;\n\nselect 333;"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 5)
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	m = nm
+
+	if gotLine, gotCol := m.tabs[0].ta.Line(), m.tabs[0].ta.LineInfo().CharOffset; gotLine != 2 || gotCol != 5 {
+		t.Fatalf("textarea cursor after alt+down = (%d,%d), want (2,5)", gotLine, gotCol)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close after alt+down block jump")
+	}
+	if m.tabs[0].selection.Active {
+		t.Fatalf("textarea selection should clear after alt+down block jump")
+	}
+}
+
+func TestAltUpAtFirstTextareaQueryBlockIsNoOp(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect 22;"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 4)
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m = nm
+
+	if gotLine, gotCol := m.tabs[0].ta.Line(), m.tabs[0].ta.LineInfo().CharOffset; gotLine != 0 || gotCol != 4 {
+		t.Fatalf("textarea cursor after top alt+up = (%d,%d), want (0,4)", gotLine, gotCol)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close on top alt+up no-op")
+	}
+}
+
+func TestAltUpMovesVimCursorToPreviousQueryBlock(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 4)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect 22;\n\nselect 333;"}})
+	m.tabs[0].vim.Buf.SetCursor(4, 6)
+	m.tabs[0].vim.TopRow = 4
+	m.tabs[0].vim.Mode = vim.ModeVisual
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m = nm
+
+	if gotRow, gotCol := m.tabs[0].vim.Buf.CursorRow(), m.tabs[0].vim.Buf.CursorCol(); gotRow != 2 || gotCol != 6 {
+		t.Fatalf("vim cursor after alt+up = (%d,%d), want (2,6)", gotRow, gotCol)
+	}
+	if got := m.tabs[0].vim.TopRow; got > 2 {
+		t.Fatalf("vim top row after alt+up = %d, want target row revealed", got)
+	}
+	if got := m.tabs[0].vim.Mode; got != vim.ModeNormal {
+		t.Fatalf("vim mode after alt+up = %v, want %v", got, vim.ModeNormal)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close after vim alt+up block jump")
+	}
+}
+
+func TestAltUpAtFirstVimQueryBlockIsNoOp(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 4)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect 22;"}})
+	m.tabs[0].vim.Buf.SetCursor(0, 4)
+	m.tabs[0].vim.Mode = vim.ModeVisual
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m = nm
+
+	if gotRow, gotCol := m.tabs[0].vim.Buf.CursorRow(), m.tabs[0].vim.Buf.CursorCol(); gotRow != 0 || gotCol != 4 {
+		t.Fatalf("vim cursor after top alt+up = (%d,%d), want (0,4)", gotRow, gotCol)
+	}
+	if got := m.tabs[0].vim.Mode; got != vim.ModeVisual {
+		t.Fatalf("vim mode after top alt+up no-op = %v, want %v", got, vim.ModeVisual)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close on top vim alt+up no-op")
+	}
+}
+
+func TestAltDownAtLastTextareaQueryBlockIsNoOp(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect 22;"}})
+	setTextareaCursor(&m.tabs[0].ta, 2, 4)
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	m = nm
+
+	if gotLine, gotCol := m.tabs[0].ta.Line(), m.tabs[0].ta.LineInfo().CharOffset; gotLine != 2 || gotCol != 4 {
+		t.Fatalf("textarea cursor after bottom alt+down = (%d,%d), want (2,4)", gotLine, gotCol)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close on bottom alt+down no-op")
+	}
+}
+
+func TestAltDownAtLastVimQueryBlockIsNoOp(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 4)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1;\n\nselect 22;"}})
+	m.tabs[0].vim.Buf.SetCursor(2, 4)
+	m.tabs[0].vim.Mode = vim.ModeVisual
+	m.popup.visible = true
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	m = nm
+
+	if gotRow, gotCol := m.tabs[0].vim.Buf.CursorRow(), m.tabs[0].vim.Buf.CursorCol(); gotRow != 2 || gotCol != 4 {
+		t.Fatalf("vim cursor after bottom alt+down = (%d,%d), want (2,4)", gotRow, gotCol)
+	}
+	if got := m.tabs[0].vim.Mode; got != vim.ModeVisual {
+		t.Fatalf("vim mode after bottom alt+down no-op = %v, want %v", got, vim.ModeVisual)
+	}
+	if m.popup.visible {
+		t.Fatalf("popup should close on bottom vim alt+down no-op")
+	}
+}
+
 func TestRenderContentPreservesSyntaxHighlighting(t *testing.T) {
 	m := New(testConfig())
 	m = m.SetSize(80, 8)
@@ -226,6 +1258,59 @@ func TestRenderContentPreservesSyntaxHighlighting(t *testing.T) {
 	rendered := m.renderContent()
 	if !strings.Contains(rendered, "\x1b[") {
 		t.Fatalf("renderContent() should include ANSI syntax highlighting, got %q", rendered)
+	}
+}
+
+func TestRenderContentHighlightsMissingSchemaTableAndQualifiedColumn(t *testing.T) {
+	m := New(testConfig()).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select U.MissingField from tblUser U join tblGhost G on U.Id = G.UserId",
+	}})
+
+	rendered := m.renderContent()
+	if !strings.Contains(rendered, missingSchemaRefStyle.Render("MissingField")) {
+		t.Fatalf("renderContent() should mark missing qualified column red; got %q", rendered)
+	}
+	if !strings.Contains(rendered, missingSchemaRefStyle.Render("tblGhost")) {
+		t.Fatalf("renderContent() should mark missing table red; got %q", rendered)
+	}
+}
+
+func TestRenderVimContentHighlightsMissingSchemaTableAndQualifiedColumn(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg).SetSchema(joinInferenceTestSchema())
+	m = m.SetSize(100, 8)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "select U.MissingField from tblUser U join tblGhost G on U.Id = G.UserId",
+	}})
+
+	rendered := m.renderVimContent()
+	if !strings.Contains(rendered, missingSchemaRefStyle.Render("MissingField")) {
+		t.Fatalf("renderVimContent() should mark missing qualified column red; got %q", rendered)
+	}
+	if !strings.Contains(rendered, missingSchemaRefStyle.Render("tblGhost")) {
+		t.Fatalf("renderVimContent() should mark missing table red; got %q", rendered)
+	}
+}
+
+func TestInvalidSchemaHighlightSpansInBlockMarksOnlyMissingResolvedNames(t *testing.T) {
+	block := "select U.MissingField from tblUser U join tblGhost G on U.Id = G.UserId"
+	spans := invalidSchemaHighlightSpansInBlock(block, joinInferenceTestSchema())
+	if len(spans) != 2 {
+		t.Fatalf("invalidSchemaHighlightSpansInBlock() len = %d, want 2 (%#v)", len(spans), spans)
+	}
+	var got []string
+	for _, span := range spans {
+		got = append(got, string([]rune(block)[span.start:span.end]))
+	}
+	sort.Strings(got)
+	want := []string{"MissingField", "tblGhost"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("invalidSchemaHighlightSpansInBlock() = %#v, want %#v", got, want)
 	}
 }
 
@@ -384,6 +1469,88 @@ func TestEditorClickPlacesTextareaCursor(t *testing.T) {
 	}
 }
 
+func TestEditorMouseDragSelectsText(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "alpha bravo"}})
+	gutterW := textareaGutterWidth(m.tabs[0].ta.View(), 1)
+
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}, gutterW, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft}, gutterW+5, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}, gutterW+5, 1)
+
+	start, end, ok := m.textareaSelectionRange()
+	if !ok {
+		t.Fatalf("expected active mouse selection after drag")
+	}
+	if start != (textPos{Line: 0, Col: 0}) || end != (textPos{Line: 0, Col: 5}) {
+		t.Fatalf("mouse selection = (%+v,%+v), want [(0,0),(0,5)]", start, end)
+	}
+	if m.MouseSelecting() {
+		t.Fatalf("mouseSelecting should be false after release")
+	}
+}
+
+func TestEditorMouseClickDoesNotLeaveSelection(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "alpha bravo"}})
+	gutterW := textareaGutterWidth(m.tabs[0].ta.View(), 1)
+
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}, gutterW+3, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}, gutterW+3, 1)
+
+	if _, _, ok := m.textareaSelectionRange(); ok {
+		t.Fatalf("plain mouse click should not leave an active selection")
+	}
+	if got := m.tabs[0].ta.LineInfo().CharOffset; got != 3 {
+		t.Fatalf("clicked cursor col = %d, want 3", got)
+	}
+}
+
+func TestEditorMouseDragSelectsTextInVimMode(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "alpha bravo"}})
+	gutterW := lineNumberGutterWidth(m.tabs[0].vim.Buf.LineCount())
+
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}, gutterW, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft}, gutterW+5, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}, gutterW+5, 1)
+
+	if got := m.tabs[0].vim.Mode; got != vim.ModeVisual {
+		t.Fatalf("vim mode after mouse drag = %v, want %v", got, vim.ModeVisual)
+	}
+	start, end := m.tabs[0].vim.SelectionRange()
+	if start != (vim.Pos{Row: 0, Col: 0}) || end != (vim.Pos{Row: 0, Col: 5}) {
+		t.Fatalf("vim selection after drag = (%+v,%+v), want [(0,0),(0,5)]", start, end)
+	}
+	if m.MouseSelecting() {
+		t.Fatalf("mouseSelecting should be false after vim release")
+	}
+}
+
+func TestEditorMouseClickDoesNotLeaveVimSelection(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "alpha bravo"}})
+	gutterW := lineNumberGutterWidth(m.tabs[0].vim.Buf.LineCount())
+
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}, gutterW+3, 1)
+	m = m.Mouse(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}, gutterW+3, 1)
+
+	if got := m.tabs[0].vim.Mode; got != vim.ModeNormal {
+		t.Fatalf("vim mode after plain click = %v, want %v", got, vim.ModeNormal)
+	}
+	if gotRow, gotCol := m.tabs[0].vim.Buf.CursorRow(), m.tabs[0].vim.Buf.CursorCol(); gotRow != 0 || gotCol != 3 {
+		t.Fatalf("vim cursor after plain click = (%d,%d), want (0,3)", gotRow, gotCol)
+	}
+}
+
 func TestNonVimShiftDownPreservesMultilineSelectionColumn(t *testing.T) {
 	m := New(testConfig())
 	m = m.SetSize(80, 8)
@@ -429,28 +1596,61 @@ func TestCommentSQLLinePreservesIndentation(t *testing.T) {
 	}
 }
 
-func TestIsCommentShortcut(t *testing.T) {
-	if !isCommentShortcut(tea.KeyMsg{Type: tea.KeyCtrlUnderscore}) {
-		t.Fatalf("expected KeyCtrlUnderscore to be recognized as a comment shortcut")
+func TestCommentSQLLineUncommentsIndentedLine(t *testing.T) {
+	got, changedAt, delta := commentSQLLine("    -- select 1")
+	if got != "    select 1" {
+		t.Fatalf("commentSQLLine() = %q, want indented SQL uncomment", got)
 	}
-	if !isCommentShortcut(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{31}}) {
-		t.Fatalf("expected raw unit-separator rune to be recognized as a comment shortcut")
-	}
-	if isCommentShortcut(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}) {
-		t.Fatalf("plain slash should not be recognized as a comment shortcut")
+	if changedAt != 4 || delta != -3 {
+		t.Fatalf("commentSQLLine() metadata = (%d,%d), want (4,-3)", changedAt, delta)
 	}
 }
 
-func TestUpdateCtrlUnderscoreCommentsCurrentLine(t *testing.T) {
+func TestIsCommentShortcut(t *testing.T) {
+	m := New(testConfig())
+	if !m.isCommentShortcut(tea.KeyMsg{Type: tea.KeyCtrlBackslash}) {
+		t.Fatalf("expected KeyCtrlBackslash to be recognized as a comment shortcut")
+	}
+	if !m.isCommentShortcut(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{28}}) {
+		t.Fatalf("expected raw file-separator rune to be recognized as a comment shortcut")
+	}
+	if m.isCommentShortcut(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}}) {
+		t.Fatalf("plain backslash should not be recognized as a comment shortcut")
+	}
+}
+
+func TestLegacyCtrlSlashConfigStillMatchesCtrlUnderscore(t *testing.T) {
+	cfg := testConfig()
+	cfg.Keys.ToggleComment = "ctrl+/"
+	m := New(cfg)
+	if !m.isCommentShortcut(tea.KeyMsg{Type: tea.KeyCtrlUnderscore}) {
+		t.Fatalf("expected legacy ctrl+/ config to still match ctrl+_")
+	}
+}
+
+func TestUpdateCtrlBackslashCommentsCurrentLine(t *testing.T) {
 	m := New(testConfig())
 	m = m.SetSize(80, 8)
 	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "select 1\nselect 2"}})
 	setTextareaCursor(&m.tabs[0].ta, 0, 0)
 
-	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlUnderscore})
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlBackslash})
 	m = nm
 	if got := m.tabs[0].ta.Value(); got != "-- select 1\nselect 2" {
-		t.Fatalf("value after KeyCtrlUnderscore = %q, want first line commented", got)
+		t.Fatalf("value after KeyCtrlBackslash = %q, want first line commented", got)
+	}
+}
+
+func TestUpdateCtrlBackslashUncommentsCurrentLine(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "-- select 1\nselect 2"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 0)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlBackslash})
+	m = nm
+	if got := m.tabs[0].ta.Value(); got != "select 1\nselect 2" {
+		t.Fatalf("value after KeyCtrlBackslash toggle = %q, want first line uncommented", got)
 	}
 }
 
@@ -487,6 +1687,21 @@ func TestCommentCurrentLineTextareaOnLastLineStaysPut(t *testing.T) {
 	}
 }
 
+func TestCommentCurrentLineTextareaUncommentsLastLineAndAdjustsCursor(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "-- select 1"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, 3)
+
+	m, _ = m.commentCurrentLineTextarea()
+	if got := m.tabs[0].ta.Value(); got != "select 1" {
+		t.Fatalf("value after commentCurrentLineTextarea() toggle = %q, want uncommented line", got)
+	}
+	if got := m.tabs[0].ta.LineInfo().CharOffset; got != 0 {
+		t.Fatalf("cursor col after uncomment toggle = %d, want 0", got)
+	}
+}
+
 func TestCommentCurrentLineVimCommentsLineAndMovesDown(t *testing.T) {
 	cfg := testConfig()
 	cfg.Editor.VimMode = true
@@ -501,6 +1716,23 @@ func TestCommentCurrentLineVimCommentsLineAndMovesDown(t *testing.T) {
 	}
 	if got := m.tabs[0].vim.Buf.CursorRow(); got != 1 {
 		t.Fatalf("vim cursor row after commentCurrentLineVim() = %d, want 1", got)
+	}
+}
+
+func TestCommentCurrentLineVimUncommentsLineAndMovesDown(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "query1.sql", Content: "-- select 1\nselect 2"}})
+	m.tabs[0].vim.Buf.SetCursor(0, 0)
+
+	m, _ = m.commentCurrentLineVim()
+	if got := m.tabs[0].vim.Buf.Value(); got != "select 1\nselect 2" {
+		t.Fatalf("vim buffer after commentCurrentLineVim() toggle = %q, want first line uncommented", got)
+	}
+	if got := m.tabs[0].vim.Buf.CursorRow(); got != 1 {
+		t.Fatalf("vim cursor row after uncomment toggle = %d, want 1", got)
 	}
 }
 
@@ -671,7 +1903,7 @@ func testConfig() *config.Config {
 		LineNumber:        "#4a4a4a",
 		CursorLineNumber:  "#858585",
 		Selection:         "#264f78",
-		ActiveQueryGutter: "#c86f93",
+		ActiveQueryGutter: "#a64d73",
 		Cursor:            "#a6e3a1",
 		InsertCursor:      "#a6e3a1",
 	}}

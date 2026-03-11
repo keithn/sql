@@ -125,6 +125,32 @@ func TestBufferDeleteCharBeforeJoin(t *testing.T) {
 	}
 }
 
+func TestBufferDeleteCharAtCursor(t *testing.T) {
+	b := NewBuffer()
+	b.SetValue("abc")
+	b.col = 1
+	b.DeleteCharAtCursor()
+	if b.Value() != "ac" {
+		t.Errorf("want 'ac', got %q", b.Value())
+	}
+	if b.CursorCol() != 1 {
+		t.Errorf("cursor should stay at col 1, got %d", b.CursorCol())
+	}
+}
+
+func TestBufferDeleteCharAtCursorJoin(t *testing.T) {
+	b := NewBuffer()
+	b.SetValue("foo\nbar")
+	b.col = 3
+	b.DeleteCharAtCursor()
+	if b.Value() != "foobar" {
+		t.Errorf("want 'foobar', got %q", b.Value())
+	}
+	if b.CursorRow() != 0 || b.CursorCol() != 3 {
+		t.Errorf("cursor should stay at (0,3), got (%d,%d)", b.CursorRow(), b.CursorCol())
+	}
+}
+
 func TestBufferDeleteLines(t *testing.T) {
 	b := NewBuffer()
 	b.SetValue("a\nb\nc")

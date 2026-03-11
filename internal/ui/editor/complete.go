@@ -44,6 +44,55 @@ func (c CompletionItem) kindLabel() string {
 	}
 }
 
+type popupMode int
+
+const (
+	popupModeCompletion popupMode = iota
+	popupModeRefactor
+)
+
+type popupAction string
+
+const popupActionNameTableAlias popupAction = "name_table_alias"
+
+const popupActionExpandSelectStar popupAction = "expand_select_star"
+
+const popupActionConvertSelectToUpdate popupAction = "convert_select_to_update"
+
+const popupActionAppendUpdateBelow popupAction = "append_update_below"
+
+const popupActionConvertUpdateToSelect popupAction = "convert_update_to_select"
+
+const popupActionAppendSelectBelow popupAction = "append_select_below"
+
+type popupItem struct {
+	Text       string
+	InsertText string
+	Kind       CompletionKind
+	Detail     string
+	Shortcut   string
+	Action     popupAction
+}
+
+func (p popupItem) kindLabel() string {
+	switch p.Kind {
+	case CompletionKindKeyword:
+		return "keyword"
+	case CompletionKindTable:
+		return "table"
+	case CompletionKindView:
+		return "view"
+	case CompletionKindColumn:
+		return "column"
+	case CompletionKindFunction:
+		return "function"
+	case CompletionKindProcedure:
+		return "procedure"
+	default:
+		return "name"
+	}
+}
+
 // sqlKeywords is the static completion list for SQL keywords.
 var sqlKeywords = []string{
 	"ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC",
@@ -75,10 +124,20 @@ var sqlKeywordItems = makeKeywordCompletionItems(sqlKeywords)
 
 // completionPopup holds the state for the autocomplete dropdown.
 type completionPopup struct {
-	items    []CompletionItem
+	items    []popupItem
 	selected int
 	visible  bool
 	word     string // partial word that triggered the popup
+	mode     popupMode
+	title    string
+}
+
+func popupItemsFromCompletions(items []CompletionItem) []popupItem {
+	out := make([]popupItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, popupItem{Text: item.Text, Kind: item.Kind})
+	}
+	return out
 }
 
 func makeKeywordCompletionItems(keywords []string) []CompletionItem {

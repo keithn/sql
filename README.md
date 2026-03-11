@@ -7,10 +7,15 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 ## Features
 
 - **Multi-database** — SQL Server, PostgreSQL, SQLite (pure Go, no CGo)
+- **Named/saved connections** — raw DSNs, saved connections, keychain-backed passwords, and last-used connection restore
+- **Connection management in-app** — `Ctrl+K` connection switcher, plus add/save/connect flow from inside the TUI
 - **Smart block execution** — `Ctrl+E` runs the logical statement under the cursor; `F5` runs the full buffer
-- **Syntax highlighting** — SQL highlighted as you type
+- **Editor refactors and formatting** — active-block formatting plus `Ctrl+R` refactors for aliasing, `SELECT *` expansion, and `SELECT`/`UPDATE` conversions
+- **Schema-aware SQL assistance** — autocomplete, JOIN predicate inference, and missing table/qualified-column highlighting
+- **Syntax highlighting** — SQL highlighted as you type, with schema-aware missing-name highlighting when metadata is available
 - **Schema browser** — `Ctrl+B` / `F2` to toggle a left-side tree of tables and columns
-- **Schema-aware autocomplete** — keywords + table/column names from the connected database
+- **Vim mode** — toggleable vim editing with persistent mode state and insert-mode cursor handling
+- **Help/settings overlay** — `F1` shows runtime keybindings, state, and loaded config/theme values
 - **Virtual scrolling** — large result sets (tens of thousands of rows) stay snappy
 - **Multi-tab editor** — `Ctrl+N` to open a new tab, `Ctrl+W` to close, `Ctrl+PgDn`/`Ctrl+PgUp` to switch
 - **Session restore** — open tabs and active query are saved on quit and restored on reconnect
@@ -44,6 +49,15 @@ go build -o sql ./cmd/sql/
 # Connect with a connection string
 sql "server=1.2.3.4;user id=sa;password=...;database=mydb"
 
+# List saved/named connections
+sql --list
+
+# Save a named connection
+sql --add "server=1.2.3.4;user id=sa;password=...;database=mydb" --name prod
+
+# Connect using a saved/named connection
+sql prod
+
 # SQLite
 sql ./mydb.sqlite
 
@@ -71,7 +85,10 @@ Passwords are never displayed in the UI.
 
 | Key | Action |
 |-----|--------|
+| `F1` | Help / settings overlay |
+| `Ctrl+K` | Connection switcher |
 | `Ctrl+E` | Execute block under cursor |
+| `Ctrl+Shift+F` / `Ctrl+F` | Format active block |
 | `F5` | Execute full buffer |
 | `F3` / `Alt+1` | Focus editor |
 | `F4` / `Alt+2` | Focus results |
@@ -86,8 +103,18 @@ Passwords are never displayed in the UI.
 | `Ctrl+W` | Close tab |
 | `Ctrl+PgDn` / `Alt+L` | Next tab |
 | `Ctrl+PgUp` / `Alt+H` | Previous tab |
+| `Alt+Up` / `Alt+Down` | Previous / next query block |
+| `Ctrl+R` | Open refactor popup |
+| `Ctrl+\` | Toggle comment on current line |
 | `Tab` | Insert 4 spaces |
 | `Esc` | Dismiss autocomplete |
+
+Refactor popup actions currently include:
+
+- `N` — name/alias current table in the active query block
+- `E` — expand top-level `SELECT *`
+- `u` / `U` — convert current `SELECT` to `UPDATE`, or append an `UPDATE` below it
+- `s` / `S` — convert current `UPDATE` to `SELECT`, or append a `SELECT` below it
 
 ### Results
 
