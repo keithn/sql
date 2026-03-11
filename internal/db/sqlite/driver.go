@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "modernc.org/sqlite"
 	"github.com/sqltui/sql/internal/db"
+	_ "modernc.org/sqlite"
 )
 
 func init() {
@@ -31,6 +31,9 @@ func (d *Driver) Open(ctx context.Context, dsn string) (*sql.DB, error) {
 }
 
 func (d *Driver) BuildDSN(params map[string]string) (string, error) {
+	if raw, ok := params["raw"]; ok && raw != "" {
+		return raw, nil
+	}
 	if path, ok := params["file"]; ok {
 		return path, nil
 	}

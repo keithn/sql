@@ -44,8 +44,9 @@ type ConnectMsg struct {
 
 // ConnectedMsg signals a successful connection.
 type ConnectedMsg struct {
-	Name        string // display name (password redacted), used for statusbar + workspace key
-	Session     *db.Session
+	DisplayName  string
+	WorkspaceKey string
+	Session      *db.Session
 }
 
 // ConnectErrMsg signals a failed connection attempt.

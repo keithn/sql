@@ -7,7 +7,9 @@ import (
 	"github.com/sqltui/sql/internal/config"
 	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/ui/editor"
+	uihelp "github.com/sqltui/sql/internal/ui/help"
 	"github.com/sqltui/sql/internal/ui/modal"
+	"github.com/sqltui/sql/internal/ui/palette"
 	"github.com/sqltui/sql/internal/ui/results"
 	"github.com/sqltui/sql/internal/ui/schema"
 	"github.com/sqltui/sql/internal/ui/statusbar"
@@ -18,7 +20,7 @@ import (
 type FocusedPane int
 
 const (
-	PaneEditor  FocusedPane = iota
+	PaneEditor FocusedPane = iota
 	PaneResults
 	PaneSchema
 )
@@ -35,6 +37,8 @@ type Model struct {
 
 	editor    editor.Model
 	results   results.Model
+	help      uihelp.Model
+	palette   palette.Model
 	schema    schema.Model
 	statusbar statusbar.Model
 	modal     modal.Model
@@ -57,10 +61,17 @@ func New(cfg *config.Config, connectTo string) Model {
 		schemaWidth: 28,
 		editor:      editor.New(cfg),
 		results:     results.New(),
+		help:        uihelp.New(),
+		palette:     palette.New(),
 		schema:      schema.New(),
 		statusbar:   statusbar.New(),
+		modal:       modal.New(),
 		ws:          ws,
 	}
+	if vimEnabled, ok, err := ws.LoadVimMode(); err == nil && ok {
+		m.editor = m.editor.SetVimEnabled(vimEnabled)
+	}
+	m.statusbar = m.statusbar.SetVimMode(m.editor.VimMode())
 
 	// Load the adhoc workspace so there's always a persistent query file.
 	if dir, err := ws.ConnDir("_adhoc"); err == nil {
@@ -70,6 +81,8 @@ func New(cfg *config.Config, connectTo string) Model {
 
 	if connectTo != "" {
 		m.pendingConnect = connectTo
+	} else if last, err := ws.LoadLastConnection(); err == nil {
+		m.pendingConnect = last
 	}
 	return m
 }

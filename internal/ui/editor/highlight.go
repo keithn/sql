@@ -13,9 +13,6 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
-// cursorStyle is the virtual block cursor applied to the character under the cursor.
-var cursorStyle = lipgloss.NewStyle().Reverse(true)
-
 // highlightLines tokenizes sql with chroma and returns one ANSI-colored string
 // per source line. Length matches strings.Count(sql, "\n") + 1.
 func highlightLines(sql string) []string {
@@ -46,15 +43,13 @@ func highlightLines(sql string) []string {
 	return strings.Split(out, "\n")
 }
 
-// injectCursor applies a reverse-video cursor at visual column col within the
-// ANSI-highlighted string hlText. Both left and right sides retain their ANSI
-// coloring.
-func injectCursor(hlText string, col int) string {
+// injectCursorStyled applies a custom lipgloss style as the cursor character.
+func injectCursorStyled(hlText string, col int, style lipgloss.Style) string {
 	stripped := xansi.Strip(hlText)
 	runes := []rune(stripped)
 
 	if len(runes) == 0 {
-		return cursorStyle.Render(" ")
+		return style.Render(" ")
 	}
 
 	cursorChar := " "
@@ -64,7 +59,7 @@ func injectCursor(hlText string, col int) string {
 
 	left := xansi.Truncate(hlText, col, "")
 	right := skipVisualCols(hlText, col+1)
-	return left + cursorStyle.Render(cursorChar) + right
+	return left + style.Render(cursorChar) + right
 }
 
 // skipVisualCols returns s with the first n visual columns removed.

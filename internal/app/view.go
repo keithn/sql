@@ -7,8 +7,8 @@ func (m Model) View() string {
 	resultsView := m.results.View()
 	statusView := m.statusbar.View()
 
-	// Stack editor and results vertically.
-	content := lipgloss.JoinVertical(lipgloss.Left, editorView, resultsView)
+	// Stack editor, statusbar, and results vertically.
+	content := lipgloss.JoinVertical(lipgloss.Left, editorView, statusView, resultsView)
 
 	// Place schema overlay to the left when open.
 	if m.schemaOpen {
@@ -16,5 +16,17 @@ func (m Model) View() string {
 		content = lipgloss.JoinHorizontal(lipgloss.Top, schemaView, content)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, content, statusView)
+	if m.modal.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.modal.View())
+	}
+
+	if m.help.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.help.View())
+	}
+
+	if m.palette.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
+	}
+
+	return content
 }

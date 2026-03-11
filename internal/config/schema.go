@@ -10,12 +10,12 @@ type Config struct {
 }
 
 type ConnectionProfile struct {
-	Name        string
-	Driver      string // "mssql", "postgres", "sqlite"
-	Host        string
-	Port        int
-	Database    string
-	Username    string
+	Name     string
+	Driver   string // "mssql", "postgres", "sqlite"
+	Host     string
+	Port     int
+	Database string
+	Username string
 	// Password is never stored here; fetched from OS keychain at connect time.
 	SSLMode     string
 	WindowsAuth bool
@@ -75,4 +75,6 @@ type ThemeConfig struct {
 	ConnColors        []string
 	LineNumber        string // gutter: non-cursor lines
 	CursorLineNumber  string // gutter: line the cursor is on
+	ActiveQueryGutter string // gutter: active Ctrl+E block marker background
+	InsertCursor      string // vim insert-mode cursor color
 }

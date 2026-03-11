@@ -157,3 +157,71 @@ func TestDetectDriver(t *testing.T) {
 		})
 	}
 }
+
+func TestStripPassword(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "url style",
+			input: "postgres://app:secret@localhost/mydb",
+			want:  "postgres://app@localhost/mydb",
+		},
+		{
+			name:  "postgres dsn style",
+			input: "host=localhost dbname=mydb user=app password=secret sslmode=disable",
+			want:  "host=localhost dbname=mydb user=app sslmode=disable",
+		},
+		{
+			name:  "mssql adonet style",
+			input: "Server=myhost;Database=mydb;User Id=sa;Password=secret;",
+			want:  "Server=myhost;Database=mydb;User Id=sa;",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StripPassword(tt.input); got != tt.want {
+				t.Fatalf("StripPassword(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInjectPassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		password string
+		want     string
+	}{
+		{
+			name:     "url style",
+			input:    "postgres://app@localhost/mydb",
+			password: "secret",
+			want:     "postgres://app:secret@localhost/mydb",
+		},
+		{
+			name:     "postgres dsn style",
+			input:    "host=localhost dbname=mydb user=app sslmode=disable",
+			password: "secret",
+			want:     "host=localhost dbname=mydb user=app sslmode=disable password=secret",
+		},
+		{
+			name:     "mssql adonet style",
+			input:    "Server=myhost;Database=mydb;User Id=sa;",
+			password: "secret",
+			want:     "Server=myhost;Database=mydb;User Id=sa;Password=secret;",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InjectPassword(tt.input, tt.password); got != tt.want {
+				t.Fatalf("InjectPassword(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

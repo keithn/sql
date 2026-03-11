@@ -6,6 +6,44 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
+// CompletionKind identifies what a popup item represents.
+type CompletionKind string
+
+const (
+	CompletionKindKeyword   CompletionKind = "keyword"
+	CompletionKindTable     CompletionKind = "table"
+	CompletionKindView      CompletionKind = "view"
+	CompletionKindColumn    CompletionKind = "column"
+	CompletionKindFunction  CompletionKind = "function"
+	CompletionKindProcedure CompletionKind = "procedure"
+	CompletionKindName      CompletionKind = "name"
+)
+
+// CompletionItem is one autocomplete candidate plus its UI kind.
+type CompletionItem struct {
+	Text string
+	Kind CompletionKind
+}
+
+func (c CompletionItem) kindLabel() string {
+	switch c.Kind {
+	case CompletionKindKeyword:
+		return "keyword"
+	case CompletionKindTable:
+		return "table"
+	case CompletionKindView:
+		return "view"
+	case CompletionKindColumn:
+		return "column"
+	case CompletionKindFunction:
+		return "function"
+	case CompletionKindProcedure:
+		return "procedure"
+	default:
+		return "name"
+	}
+}
+
 // sqlKeywords is the static completion list for SQL keywords.
 var sqlKeywords = []string{
 	"ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC",
@@ -33,12 +71,22 @@ var sqlKeywords = []string{
 	"WHEN", "WHERE", "WITH",
 }
 
+var sqlKeywordItems = makeKeywordCompletionItems(sqlKeywords)
+
 // completionPopup holds the state for the autocomplete dropdown.
 type completionPopup struct {
-	items    []string
+	items    []CompletionItem
 	selected int
 	visible  bool
 	word     string // partial word that triggered the popup
+}
+
+func makeKeywordCompletionItems(keywords []string) []CompletionItem {
+	items := make([]CompletionItem, 0, len(keywords))
+	for _, kw := range keywords {
+		items = append(items, CompletionItem{Text: kw, Kind: CompletionKindKeyword})
+	}
+	return items
 }
 
 // wordBefore returns the SQL identifier being typed immediately before col
@@ -61,31 +109,34 @@ func isWordRune(r rune) bool {
 }
 
 // getCompletions returns fuzzy-matched completions for pattern, checking
-// keywords first then extra schema names. Results are ranked by match score.
+// keywords first then extra schema items. Results are ranked by match score.
 // Returns at most maxItems results.
-func getCompletions(pattern string, extra []string, maxItems int) []string {
+func getCompletions(pattern string, extra []CompletionItem, maxItems int) []CompletionItem {
 	if pattern == "" {
 		return nil
 	}
 	up := strings.ToUpper(pattern)
 
-	// Build a deduplicated candidate list: keywords first, then schema names.
+	// Build a deduplicated candidate list: keywords first, then schema items.
 	seen := map[string]bool{}
-	candidates := make([]string, 0, len(sqlKeywords)+len(extra))
-	for _, kw := range sqlKeywords {
-		candidates = append(candidates, kw)
-		seen[kw] = true
+	candidates := make([]CompletionItem, 0, len(sqlKeywordItems)+len(extra))
+	for _, item := range sqlKeywordItems {
+		key := strings.ToUpper(item.Text)
+		candidates = append(candidates, item)
+		seen[key] = true
 	}
-	for _, name := range extra {
-		if !seen[strings.ToUpper(name)] {
-			candidates = append(candidates, name)
+	for _, item := range extra {
+		key := strings.ToUpper(item.Text)
+		if item.Text != "" && !seen[key] {
+			candidates = append(candidates, item)
+			seen[key] = true
 		}
 	}
 
 	// Use a case-insensitive source so "sel" matches "SELECT" and "sales_table".
-	matches := fuzzy.FindFrom(up, upperSource(candidates))
+	matches := fuzzy.FindFrom(up, completionSource(candidates))
 
-	out := make([]string, 0, maxItems)
+	out := make([]CompletionItem, 0, maxItems)
 	for _, m := range matches {
 		out = append(out, candidates[m.Index])
 		if len(out) >= maxItems {
@@ -95,9 +146,8 @@ func getCompletions(pattern string, extra []string, maxItems int) []string {
 	return out
 }
 
-// upperSource wraps a string slice so fuzzy matching is case-insensitive.
-type upperSource []string
+// completionSource wraps completion items so fuzzy matching is case-insensitive.
+type completionSource []CompletionItem
 
-func (u upperSource) String(i int) string { return strings.ToUpper(u[i]) }
-func (u upperSource) Len() int            { return len(u) }
-
+func (u completionSource) String(i int) string { return strings.ToUpper(u[i].Text) }
+func (u completionSource) Len() int            { return len(u) }
