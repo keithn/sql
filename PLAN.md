@@ -1,6 +1,6 @@
 ## sql outstanding work plan
 
-Last updated: 2026-03-11 (after IDENTITY_INSERT refactor action)
+Last updated: 2026-03-12 (after paste/UX polish session)
 
 ### Status key
 - `[x]` done
@@ -60,9 +60,10 @@ Last updated: 2026-03-11 (after IDENTITY_INSERT refactor action)
 - `[x]` Finish query execution modes beyond current block/buffer behavior
 
 #### P2 — schema and results UX
+- `[x]` Schema browser generates `alias.*` projections for JOIN'd tables in SELECT
 - `[ ]` Schema browser fuzzy filter
 - `[ ]` Schema browser action menu
-- `[ ]` Export flows from results pane
+- `[x]` Export flows from results pane (CSV / Markdown / JSON / SQL INSERT → file or clipboard)
 - `[ ]` Remaining results interactions (sort/filter/edit-mode follow-ups)
 
 #### P2 — config and theming completeness
@@ -79,9 +80,10 @@ Last updated: 2026-03-11 (after IDENTITY_INSERT refactor action)
 - `[ ]` Advanced export / remote clipboard / edit mode follow-ups
 
 ### Immediate next step
-1. Return to remaining broader modal/palette polish.
-2. Then move into schema/results export follow-ups.
-3. Then keep updating this file after each completed slice.
+1. Schema browser fuzzy filter and action menu (P2).
+2. Remaining results interactions.
+3. Align runtime behavior with README/SPEC where overstated.
+4. Keep updating this file after each completed slice.
 
 ### Progress log
 - `2026-03-11`: Created this plan and started work on the P0 saved/named connection slice.
@@ -106,3 +108,8 @@ Last updated: 2026-03-11 (after IDENTITY_INSERT refactor action)
 - `2026-03-11`: Added non-executing explain-plan support across SQLite, PostgreSQL, and SQL Server drivers, surfaced it as `Explain current block` / `Explain full buffer` command-palette actions, and rendered explain output in the normal results pane with one result set per explainable statement.
 - `2026-03-11`: Added explicit `Run current block in transaction` and `Run full buffer in transaction` command-palette actions. They begin a transaction if needed, execute inside the transaction, leave it open for manual commit/rollback, reuse confirmation for full-buffer runs, record history as `BLOCK_TX` / `BUFFER_TX`, and were validated with focused app regressions plus full test/build runs.
 - `2026-03-11`: Added a conservative `Ctrl+R` → `i` editor refactor that wraps the active `INSERT [INTO] <table>` block with `SET IDENTITY_INSERT <table> ON/OFF`, preserving qualified/bracketed table names, working in both textarea and vim modes, and leaving non-INSERT blocks unchanged.
+- `2026-03-12`: Added schema-browser alias.* projection: when the generated SELECT includes JOINs, each joined table gets `alias.*` appended to the column list instead of enumerating individual columns.
+- `2026-03-12`: Fixed CI failures: corrected `db.SchemaEntry` → `db.SchemaNode` in `complete_test.go`; made keyring unavailability (no D-Bus on Linux CI) non-fatal in `LoadPassword`.
+- `2026-03-12`: UX polish pass — new query files are named after the connection (`Local.sql`, `Local2.sql`) instead of `query1.sql`; new tabs open on the left; tab bar right-side hints show Alt+h/l, Ctrl+N, Ctrl+V, F1.
+- `2026-03-12`: Overhauled paste handling: Ctrl+V reads OS clipboard directly (bypasses vim state machine and autocomplete); `msg.Paste == true` (bracketed paste) uses same direct-insert path; Enter no longer accepts autocomplete (dismisses instead), preventing newlines during paste from triggering completions; autocomplete suppressed on blank/new lines; vim p/P multi-line charwise paste fixed with `charPasteAt` helper.
+- `2026-03-12`: Fixed Windows shift+insert (bracketed paste) detection: `cmd/sql/input_windows.go` opens `CONIN$` as a separate handle, which forces bubbletea onto its ANSI/raw-bytes reader path (avoiding the Win32 `ReadConsoleInput` event path that strips bracketed-paste markers). With `ENABLE_VIRTUAL_TERMINAL_INPUT` active, `\x1b[200~…\x1b[201~` now reaches `detectBracketedPaste` and `msg.Paste` is set correctly.
