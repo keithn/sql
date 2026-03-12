@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/atotto/clipboard"
 	"github.com/sqltui/sql/internal/config"
 	"github.com/sqltui/sql/internal/db"
 	sqlformat "github.com/sqltui/sql/internal/format"
@@ -25,6 +26,20 @@ import (
 
 // ExecuteBlockMsg asks the app to run the logical block under the cursor.
 type ExecuteBlockMsg struct{ SQL string }
+
+// clipboardPasteMsg carries text read from the OS clipboard.
+type clipboardPasteMsg string
+
+// readClipboardCmd returns a Cmd that reads from the OS clipboard.
+func readClipboardCmd() tea.Cmd {
+	return func() tea.Msg {
+		text, err := clipboard.ReadAll()
+		if err != nil {
+			return nil
+		}
+		return clipboardPasteMsg(text)
+	}
+}
 
 type vimInsertCursorBlinkMsg struct{ id int }
 
@@ -227,7 +242,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.blinkOn = !m.blinkOn
 		return m, m.scheduleVimInsertCursorBlink()
 
+	case clipboardPasteMsg:
+		return m.insertPasteText(string(msg))
+
 	case tea.KeyMsg:
+		// Intercept paste before anything else — read from OS clipboard
+		// directly so we never emulate typing and never trigger autocomplete.
+		// ctrl+v is intercepted here. shift+insert cannot be intercepted: the
+		// terminal sends clipboard content as raw keystrokes with no bracketed
+		// paste markers, so ctrl+v is the recommended paste shortcut.
+		if msg.String() == "ctrl+v" {
+			return m, readClipboardCmd()
+		}
+		// Bracketed paste (msg.Paste == true): same direct-insert path.
+		if msg.Paste {
+			return m.insertPasteText(string(msg.Runes))
+		}
+
 		if m.isCommentShortcut(msg) {
 			if m.vimEnabled {
 				return m.commentCurrentLineVim()
@@ -279,9 +310,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-			case "enter", "ctrl+e":
+			case "ctrl+e":
 				m = m.acceptCompletion()
 				return m, nil
+			case "enter":
+				// Don't accept completion on Enter — dismiss popup, let
+				// Enter fall through to insert a newline. This prevents
+				// shift+ins paste newlines from accepting completions.
+				m.popup.visible = false
 			}
 			if len(msg.String()) == 1 && !isWordRune(rune(msg.String()[0])) {
 				m.popup.visible = false
@@ -353,6 +389,32 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // updateVim handles a KeyMsg when vim mode is active.
+// insertPasteText inserts text directly into the active buffer without
+// triggering autocomplete or going through the vim state machine.
+func (m Model) insertPasteText(text string) (Model, tea.Cmd) {
+	m.popup.visible = false
+	m.popup.suppressed = false
+	tab := &m.tabs[m.active]
+	if m.vimEnabled && tab.vim != nil {
+		oldVal := tab.vim.Buf.Value()
+		tab.vim.Buf.InsertText(text)
+		newVal := tab.vim.Buf.Value()
+		if newVal != oldVal && tab.Path != "" {
+			path := tab.Path
+			return m, tea.Batch(func() tea.Msg { _ = os.WriteFile(path, []byte(newVal), 0644); return nil }, m.refreshVimInsertCursorBlink())
+		}
+		return m, m.refreshVimInsertCursorBlink()
+	}
+	// Non-vim: insert into textarea.
+	tab.ta.InsertString(text)
+	if tab.Path != "" {
+		val := tab.ta.Value()
+		path := tab.Path
+		return m, func() tea.Msg { _ = os.WriteFile(path, []byte(val), 0644); return nil }
+	}
+	return m, nil
+}
+
 func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 	// App-level shortcuts that work regardless of vim mode.
 	if m.isFormatShortcut(msg) {
@@ -385,6 +447,7 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if tab.vim == nil {
 		return m, nil
 	}
+
 	if m.popup.visible && m.popup.mode == popupModeRefactor {
 		return m.handleRefactorPopupKey(msg, true)
 	}
@@ -419,9 +482,14 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 			}
 			return m, m.restartVimInsertCursorBlink()
-		case "enter", "ctrl+e":
+		case "ctrl+e":
 			m = m.acceptCompletionVim()
 			return m, m.restartVimInsertCursorBlink()
+		case "enter":
+			// Don't accept completion on Enter — dismiss popup and let Enter
+			// fall through to the vim state machine as a newline. Prevents
+			// shift+ins paste newlines from corrupting text via autocomplete.
+			m.popup.visible = false
 		}
 		if len(msg.String()) == 1 && !isWordRune(rune(msg.String()[0])) {
 			m.popup.visible = false
@@ -1633,6 +1701,7 @@ func (m Model) renderTabBar() string {
 	hint := hintStyle.Render("Alt+") + keyStyle.Render("h") + hintStyle.Render("/") + keyStyle.Render("l") +
 		hintStyle.Render(" switch  ") +
 		keyStyle.Render("Ctrl+N") + hintStyle.Render(" new  ") +
+		keyStyle.Render("Ctrl+V") + hintStyle.Render(" paste  ") +
 		keyStyle.Render("F1") + hintStyle.Render(" help")
 	hintWidth := lipgloss.Width(hint)
 
@@ -2480,6 +2549,14 @@ func (m *Model) updatePopupVim() {
 		return
 	}
 
+	// Don't trigger on a new/blank line — only show contextual popup when
+	// there is non-whitespace content before the cursor on this line.
+	textBeforeCursor := string(line[:col])
+	if word == "" && strings.TrimSpace(textBeforeCursor) == "" {
+		m.popup.visible = false
+		return
+	}
+
 	// Context-aware: if the query references specific tables, suggest only their columns.
 	if ctxItems := contextualColumnItems(word, buf.Value(), lineNum, m.schema); len(ctxItems) > 0 {
 		m.popup = completionPopup{items: ctxItems, selected: 0, visible: true, word: word, mode: popupModeCompletion}
@@ -2561,6 +2638,14 @@ func (m *Model) updatePopup() {
 		m.popup.suppressed = false
 	}
 	if m.popup.suppressed && word == "" {
+		m.popup.visible = false
+		return
+	}
+
+	// Don't trigger on a new/blank line — only show contextual popup when
+	// there is non-whitespace content before the cursor on this line.
+	textBeforeCursor := lineText[:col]
+	if word == "" && strings.TrimSpace(textBeforeCursor) == "" {
 		m.popup.visible = false
 		return
 	}

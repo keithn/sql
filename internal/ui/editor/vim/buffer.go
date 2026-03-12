@@ -173,6 +173,21 @@ func (b *Buffer) clampCol(insertMode bool) {
 
 // ─── Insert-mode operations ───────────────────────────────────────────────────
 
+// InsertText inserts an arbitrary string at the cursor, handling newlines.
+// Intended for paste operations — does not interact with the yank register.
+func (b *Buffer) InsertText(s string) {
+	for _, r := range s {
+		if r == '\r' {
+			continue // strip CR from CRLF
+		}
+		if r == '\n' {
+			b.InsertNewline()
+		} else {
+			b.InsertRune(r)
+		}
+	}
+}
+
 // InsertRune inserts a rune at the cursor in insert mode.
 func (b *Buffer) InsertRune(r rune) {
 	row, col := b.row, b.col
