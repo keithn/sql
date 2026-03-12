@@ -32,9 +32,9 @@ func (w *Workspace) NewQueryFile(connName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Find the next available queryN.sql name.
+	// Find the next available name.
 	for i := 1; ; i++ {
-		name := filepath.Join(dir, queryName(i))
+		name := filepath.Join(dir, queryName(connName, i))
 		if _, err := os.Stat(name); os.IsNotExist(err) {
 			f, err := os.Create(name)
 			if err != nil {
@@ -46,7 +46,10 @@ func (w *Workspace) NewQueryFile(connName string) (string, error) {
 	}
 }
 
-func queryName(n int) string {
+func queryName(connName string, n int) string {
+	if n == 1 && connName != "" && connName != "_adhoc" {
+		return sanitizeName(connName) + ".sql"
+	}
 	if n == 1 {
 		return "query1.sql"
 	}

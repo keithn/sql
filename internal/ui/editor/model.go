@@ -1621,7 +1621,26 @@ func (m Model) renderTabBar() string {
 			tabs = append(tabs, inactiveTabStyle.Render(title))
 		}
 	}
-	bar := label + strings.Join(tabs, "")
+	tabsStr := label + strings.Join(tabs, "")
+	tabsWidth := lipgloss.Width(tabsStr)
+
+	hintStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555")).
+		Background(lipgloss.Color("#1e1e1e"))
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#888888")).
+		Background(lipgloss.Color("#1e1e1e"))
+	hint := hintStyle.Render("Alt+") + keyStyle.Render("h") + hintStyle.Render("/") + keyStyle.Render("l") +
+		hintStyle.Render(" switch  ") +
+		keyStyle.Render("Ctrl+N") + hintStyle.Render(" new  ") +
+		keyStyle.Render("F1") + hintStyle.Render(" help")
+	hintWidth := lipgloss.Width(hint)
+
+	gap := m.width - tabsWidth - hintWidth
+	if gap < 1 {
+		gap = 1
+	}
+	bar := tabsStr + strings.Repeat(" ", gap) + hint
 	bar = tabBarStyle.Width(m.width).Render(bar)
 	return bar
 }
@@ -2222,8 +2241,8 @@ func (m Model) AddTab(path, content string) Model {
 		t.vim = vs
 	}
 	restoreTabCursor(&t, 0, 0)
-	m.tabs = append(m.tabs, t)
-	m.active = len(m.tabs) - 1
+	m.tabs = append([]Tab{t}, m.tabs...)
+	m.active = 0
 	return m
 }
 
