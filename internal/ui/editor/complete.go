@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/sahilm/fuzzy"
+	"github.com/sqltui/sql/internal/db"
 )
 
 // CompletionKind identifies what a popup item represents.
@@ -126,12 +127,13 @@ var sqlKeywordItems = makeKeywordCompletionItems(sqlKeywords)
 
 // completionPopup holds the state for the autocomplete dropdown.
 type completionPopup struct {
-	items    []popupItem
-	selected int
-	visible  bool
-	word     string // partial word that triggered the popup
-	mode     popupMode
-	title    string
+	items      []popupItem
+	selected   int
+	visible    bool
+	word       string // partial word that triggered the popup
+	mode       popupMode
+	title      string
+	suppressed bool // true after Esc; cleared when user types a word character
 }
 
 func popupItemsFromCompletions(items []CompletionItem) []popupItem {
@@ -212,3 +214,87 @@ type completionSource []CompletionItem
 
 func (u completionSource) String(i int) string { return strings.ToUpper(u[i].Text) }
 func (u completionSource) Len() int            { return len(u) }
+
+// popupItemSource wraps []popupItem for fuzzy.FindFrom.
+type popupItemSource []popupItem
+
+func (s popupItemSource) String(i int) string { return strings.ToUpper(s[i].Text) }
+func (s popupItemSource) Len() int            { return len(s) }
+
+// contextualColumnItems builds completions when the query references specific tables.
+// It returns columns only from those referenced tables (each with a Detail field showing
+// alias or table name as the source), plus SQL keywords — all fuzzy-matched against word.
+// Returns nil if no table refs are detected or the schema is unavailable.
+func contextualColumnItems(word string, fullText string, cursorLine int, schema *db.Schema) []popupItem {
+	if schema == nil {
+		return nil
+	}
+	// Restrict to the current SQL block so refs from other statements are ignored.
+	blockText := fullText
+	if start, end, ok := detectBlockRange(fullText, cursorLine); ok {
+		lines := strings.Split(fullText, "\n")
+		if end < len(lines) {
+			blockText = strings.Join(lines[start:end+1], "\n")
+		}
+	}
+	tokens := scanSQLTokens(blockText)
+	refs := parseSQLTableRefs(tokens)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	// Build column candidates from each referenced table.
+	seen := map[string]bool{}
+	var colCandidates []popupItem
+	for _, ref := range refs {
+		info, ok := lookupSchemaTableInfo(schema, ref)
+		if !ok {
+			continue
+		}
+		qualifier := qualifierForTableRef(ref)
+		tableKey := strings.Join(ref.segments, ".") + "|" + qualifier
+		if seen[tableKey] {
+			continue
+		}
+		seen[tableKey] = true
+		for _, col := range info.Columns {
+			colCandidates = append(colCandidates, popupItem{
+				Text:   col.Name,
+				Kind:   CompletionKindColumn,
+				Detail: qualifier,
+			})
+		}
+	}
+
+	if len(colCandidates) == 0 {
+		return nil
+	}
+
+	// Empty word (e.g. after "ORDER BY "): list all columns without keyword noise.
+	if word == "" {
+		const maxBrowse = 15
+		if len(colCandidates) > maxBrowse {
+			return colCandidates[:maxBrowse]
+		}
+		return colCandidates
+	}
+
+	// Non-empty word: fuzzy-match keywords + columns together.
+	up := strings.ToUpper(word)
+	candidates := make([]popupItem, 0, len(sqlKeywords)+len(colCandidates))
+	for _, kw := range sqlKeywords {
+		candidates = append(candidates, popupItem{Text: kw, Kind: CompletionKindKeyword})
+	}
+	candidates = append(candidates, colCandidates...)
+
+	matches := fuzzy.FindFrom(up, popupItemSource(candidates))
+	const maxItems = 10
+	out := make([]popupItem, 0, maxItems)
+	for _, m := range matches {
+		out = append(out, candidates[m.Index])
+		if len(out) >= maxItems {
+			break
+		}
+	}
+	return out
+}

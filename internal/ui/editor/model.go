@@ -254,6 +254,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc":
 				m.popup.visible = false
+				m.popup.suppressed = true
 				return m, nil
 			case "up", "ctrl+p":
 				if m.popup.selected > 0 {
@@ -393,6 +394,7 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			m.popup.visible = false
+			m.popup.suppressed = true
 			return m, m.restartVimInsertCursorBlink()
 		case "up", "ctrl+p":
 			if m.popup.selected > 0 {
@@ -2450,6 +2452,21 @@ func (m *Model) updatePopupVim() {
 	}
 	word := wordBefore(string(line), col)
 
+	// A word character clears suppression; whitespace keeps it.
+	if word != "" {
+		m.popup.suppressed = false
+	}
+	if m.popup.suppressed && word == "" {
+		m.popup.visible = false
+		return
+	}
+
+	// Context-aware: if the query references specific tables, suggest only their columns.
+	if ctxItems := contextualColumnItems(word, buf.Value(), lineNum, m.schema); len(ctxItems) > 0 {
+		m.popup = completionPopup{items: ctxItems, selected: 0, visible: true, word: word, mode: popupModeCompletion}
+		return
+	}
+
 	items := getCompletions(word, m.schemaItems, 8)
 	if len(items) == 0 || word == "" {
 		m.popup.visible = false
@@ -2519,6 +2536,21 @@ func (m *Model) updatePopup() {
 	}
 	col := ta.LineInfo().CharOffset
 	word := wordBefore(lineText, col)
+
+	// A word character clears suppression; whitespace keeps it.
+	if word != "" {
+		m.popup.suppressed = false
+	}
+	if m.popup.suppressed && word == "" {
+		m.popup.visible = false
+		return
+	}
+
+	// Context-aware: if the query references specific tables, suggest only their columns.
+	if ctxItems := contextualColumnItems(word, ta.Value(), lineNum, m.schema); len(ctxItems) > 0 {
+		m.popup = completionPopup{items: ctxItems, selected: 0, visible: true, word: word, mode: popupModeCompletion}
+		return
+	}
 
 	items := getCompletions(word, m.schemaItems, 8)
 	if len(items) == 0 || word == "" {

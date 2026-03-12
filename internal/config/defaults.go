@@ -40,7 +40,7 @@ func defaults() *Config {
 			ConnColors:        []string{"#4ec9b0", "#ce9178", "#569cd6", "#dcdcaa"},
 			LineNumber:        "#4a4a4a",
 			CursorLineNumber:  "#858585",
-			ActiveQueryGutter: "#a64d73",
+			ActiveQueryGutter: "#3a3a3a",
 			InsertCursor:      "#a6e3a1",
 		},
 		Startup: map[string]string{},
