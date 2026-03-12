@@ -237,6 +237,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.detailFocus && m.detailCursor > 0 {
 				m.detailCursor--
 				m.ensureDetailCursorVisible()
+			} else if !m.detailFocus {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				prev := m.cursor
+				m.syncFiltered()
+				if prev >= len(m.filtered) {
+					m.cursor = 0
+					m.scroll = 0
+				}
+				m.resetDetailState()
+				return m, cmd
 			}
 
 		case "j":
@@ -246,6 +257,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.detailCursor++
 					m.ensureDetailCursorVisible()
 				}
+			} else if !m.detailFocus {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				prev := m.cursor
+				m.syncFiltered()
+				if prev >= len(m.filtered) {
+					m.cursor = 0
+					m.scroll = 0
+				}
+				m.resetDetailState()
+				return m, cmd
 			}
 
 		case "down", "ctrl+n":
