@@ -27,7 +27,9 @@ func LoadPassword(name string) (string, bool, error) {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, err
+		// Keyring service unavailable (e.g. no D-Bus on Linux CI) — treat
+		// as no stored password rather than a fatal error.
+		return "", false, nil
 	}
 	return password, true, nil
 }

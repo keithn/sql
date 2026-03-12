@@ -47,13 +47,14 @@ func (w *Workspace) NewQueryFile(connName string) (string, error) {
 }
 
 func queryName(connName string, n int) string {
-	if n == 1 && connName != "" && connName != "_adhoc" {
-		return sanitizeName(connName) + ".sql"
+	base := "query"
+	if connName != "" && connName != "_adhoc" {
+		base = sanitizeName(connName)
 	}
 	if n == 1 {
-		return "query1.sql"
+		return base + ".sql"
 	}
-	return "query" + itoa(n) + ".sql"
+	return base + itoa(n) + ".sql"
 }
 
 // sanitizeName makes a connection name safe for use as a directory name.
