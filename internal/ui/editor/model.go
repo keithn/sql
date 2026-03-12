@@ -806,6 +806,51 @@ func (m Model) updateToSelectRefactorVim(appendBelow bool) (Model, tea.Cmd) {
 	return m, tea.Batch(saveTextToPathCmd(tab.Path, buf.Value()), m.refreshVimInsertCursorBlink())
 }
 
+func (m Model) identityInsertRefactorTextarea() (Model, tea.Cmd) {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return m, nil
+	}
+	tab := &m.tabs[m.active]
+	text := tab.ta.Value()
+	line, col := tab.ta.Line(), tab.ta.LineInfo().CharOffset
+	updated, nextLine, nextCol, changed := applyIdentityInsertRefactor(text, line, col)
+	m.popup.visible = false
+	if !changed {
+		return m, nil
+	}
+	tab.ta.SetValue(updated)
+	setTextareaCursor(&tab.ta, nextLine, nextCol)
+	tab.selection.Active = false
+	return m, m.saveActiveTextareaCmd()
+}
+
+func (m Model) identityInsertRefactorVim() (Model, tea.Cmd) {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return m, nil
+	}
+	tab := &m.tabs[m.active]
+	if tab.vim == nil {
+		return m, nil
+	}
+	buf := tab.vim.Buf
+	text := buf.Value()
+	line, col := buf.CursorRow(), buf.CursorCol()
+	updated, nextLine, nextCol, changed := applyIdentityInsertRefactor(text, line, col)
+	m.popup.visible = false
+	if !changed {
+		return m, m.refreshVimInsertCursorBlink()
+	}
+	oldTopRow := tab.vim.TopRow
+	buf.PushUndo()
+	buf.SetValue(updated)
+	buf.SetCursor(nextLine, nextCol)
+	tab.vim.TopRow = clampInt(oldTopRow, 0, maxInt(0, buf.LineCount()-1))
+	if tab.vim.Mode == vim.ModeVisual || tab.vim.Mode == vim.ModeVisualLine {
+		tab.vim.Mode = vim.ModeNormal
+	}
+	return m, tea.Batch(saveTextToPathCmd(tab.Path, buf.Value()), m.refreshVimInsertCursorBlink())
+}
+
 func formatBlockInText(text string, cursorLine, cursorCol int) (string, int, int, bool) {
 	start, end, ok := detectBlockRange(text, cursorLine)
 	if !ok {
@@ -1864,6 +1909,57 @@ func (m Model) Value() string {
 	return m.tabs[m.active].ta.Value()
 }
 
+// CurrentBlock returns the logical SQL block at the current cursor position.
+func (m Model) CurrentBlock() string {
+	return m.blockAtCursor()
+}
+
+// WordAtCursor returns the SQL identifier token under the cursor, or "".
+func (m Model) WordAtCursor() string {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return ""
+	}
+	var text string
+	var cursor textPos
+	if m.vimEnabled && m.tabs[m.active].vim != nil {
+		text = m.tabs[m.active].vim.Buf.Value()
+		row := m.tabs[m.active].vim.Buf.CursorRow()
+		col := m.tabs[m.active].vim.Buf.CursorCol()
+		cursor = textPos{Line: row, Col: col}
+	} else {
+		text = m.tabs[m.active].ta.Value()
+		cursor = textareaCursorPos(&m.tabs[m.active].ta)
+	}
+	tokens := scanSQLTokens(text)
+	offset := textPosToRuneOffset(text, cursor)
+	return currentSQLWordAtCursor(tokens, offset)
+}
+
+// InsertText inserts text at the current cursor in the active tab and schedules persistence.
+func (m Model) InsertText(text string) (Model, tea.Cmd) {
+	if strings.TrimSpace(text) == "" || m.active < 0 || m.active >= len(m.tabs) {
+		return m, nil
+	}
+	tab := &m.tabs[m.active]
+	m.popup.visible = false
+	if m.vimEnabled && tab.vim != nil {
+		buf := tab.vim.Buf
+		oldTopRow := tab.vim.TopRow
+		buf.PushUndo()
+		insertTextIntoVimBuffer(buf, text)
+		tab.vim.TopRow = clampInt(oldTopRow, 0, maxInt(0, buf.LineCount()-1))
+		if tab.vim.Mode == vim.ModeVisual || tab.vim.Mode == vim.ModeVisualLine {
+			tab.vim.Mode = vim.ModeNormal
+		}
+		tab.Dirty = true
+		return m, tea.Batch(saveTextToPathCmd(tab.Path, buf.Value()), m.refreshVimInsertCursorBlink())
+	}
+	tab.selection.Active = false
+	tab.ta.InsertString(text)
+	tab.Dirty = true
+	return m, m.saveActiveTextareaCmd()
+}
+
 // VimMode returns the current vim mode label ("NORMAL", "INSERT", etc.)
 // or "" when vim mode is disabled.
 func (m Model) VimMode() string {
@@ -2186,6 +2282,19 @@ func cursorForTab(t Tab) (int, int) {
 		return t.vim.Buf.CursorRow(), t.vim.Buf.CursorCol()
 	}
 	return t.ta.Line(), t.ta.LineInfo().CharOffset
+}
+
+func insertTextIntoVimBuffer(buf *vim.Buffer, text string) {
+	if buf == nil || text == "" {
+		return
+	}
+	for _, r := range text {
+		if r == '\n' {
+			buf.InsertNewline()
+			continue
+		}
+		buf.InsertRune(r)
+	}
 }
 
 func textareaCursorPos(ta *textarea.Model) textPos {
@@ -2556,6 +2665,11 @@ func (m Model) openRefactorPopup() (Model, tea.Cmd) {
 			Detail:   "Append a SELECT beneath the active UPDATE block",
 			Shortcut: "S",
 			Action:   popupActionAppendSelectBelow,
+		}, {
+			Text:     "Wrap INSERT with IDENTITY_INSERT",
+			Detail:   "Wrap the active INSERT block with SQL Server IDENTITY_INSERT ON/OFF",
+			Shortcut: "i",
+			Action:   popupActionWrapIdentityInsert,
 		}},
 		selected: 0,
 		visible:  true,
@@ -2661,6 +2775,11 @@ func (m Model) applySelectedRefactor() (Model, tea.Cmd) {
 			return m.updateToSelectRefactorVim(true)
 		}
 		return m.updateToSelectRefactorTextarea(true)
+	case popupActionWrapIdentityInsert:
+		if m.vimEnabled {
+			return m.identityInsertRefactorVim()
+		}
+		return m.identityInsertRefactorTextarea()
 	default:
 		m.popup.visible = false
 		if m.vimEnabled {
@@ -2793,6 +2912,10 @@ func applyUpdateToSelectRefactor(text string, cursorLine, cursorCol int, appendB
 	})
 }
 
+func applyIdentityInsertRefactor(text string, cursorLine, cursorCol int) (string, int, int, bool) {
+	return applyBlockSQLRefactor(text, cursorLine, cursorCol, identityInsertRefactorInBlock)
+}
+
 func applyBlockSQLRefactor(text string, cursorLine, cursorCol int, transform func(block string, cursor textPos) (string, textPos, bool)) (string, int, int, bool) {
 	start, end, ok := detectBlockRange(text, cursorLine)
 	if !ok {
@@ -2907,11 +3030,57 @@ func updateToSelectRefactorInBlock(block string, cursor textPos, appendBelow boo
 	return statement, clampTextPosToValue(statement, cursor), true
 }
 
+func identityInsertRefactorInBlock(block string, cursor textPos) (string, textPos, bool) {
+	if strings.Contains(strings.ToUpper(block), "IDENTITY_INSERT") {
+		return block, clampTextPosToValue(block, cursor), false
+	}
+	target, ok := identityInsertTargetTable(block)
+	if !ok {
+		return block, clampTextPosToValue(block, cursor), false
+	}
+	base := strings.TrimRight(block, "\n")
+	prefix := "SET IDENTITY_INSERT " + target + " ON\n"
+	suffix := "\nSET IDENTITY_INSERT " + target + " OFF"
+	updated := prefix + base + suffix
+	clamped := clampTextPosToValue(base, clampTextPosToValue(block, cursor))
+	nextOffset := runeCount(prefix) + textPosToRuneOffset(base, clamped)
+	return updated, clampTextPosToValue(updated, runeOffsetToTextPos(updated, nextOffset)), true
+}
+
 func appendGeneratedStatementBelow(block, statement, keyword string) (string, textPos, bool) {
 	base := strings.TrimRight(block, "\n")
 	updated := base + "\n\n" + statement
 	startLine := strings.Count(base, "\n") + 2
 	return updated, clampTextPosToValue(updated, textPos{Line: startLine, Col: len(keyword) + 1}), true
+}
+
+func identityInsertTargetTable(block string) (string, bool) {
+	tokens := scanSQLTokens(block)
+	sig := significantSQLTokenIndices(tokens)
+	if len(sig) == 0 {
+		return "", false
+	}
+	pos := 0
+	insertTok := tokens[sig[pos]]
+	if insertTok.kind != sqlTokWord || !strings.EqualFold(insertTok.text, "INSERT") {
+		return "", false
+	}
+	pos++
+	if pos < len(sig) && tokens[sig[pos]].kind == sqlTokWord && strings.EqualFold(tokens[sig[pos]].text, "INTO") {
+		pos++
+	}
+	if pos >= len(sig) || tokens[sig[pos]].kind != sqlTokWord {
+		return "", false
+	}
+	nameTok := tokens[sig[pos]]
+	if strings.HasPrefix(normalizeSQLIdentifier(nameTok.text), "@") {
+		return "", false
+	}
+	nextPos, segments, ok := readQualifiedIdentifier(tokens, sig, pos)
+	if !ok || len(segments) == 0 {
+		return "", false
+	}
+	return sliceRunes(block, nameTok.start, tokens[sig[nextPos-1]].end), true
 }
 
 func buildUpdateFromSelectBlock(block string, schema *db.Schema) (string, bool) {

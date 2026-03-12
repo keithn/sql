@@ -4,20 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Session wraps a live database connection with execution state.
 type Session struct {
-	Name   string
-	Driver Driver
-	DB     *sql.DB
+	Name       string
+	DriverName string // "mssql", "postgres", "sqlite"
+	Driver     Driver
+	DB         *sql.DB
 
-	mu        sync.Mutex
-	cancelFn  context.CancelFunc // cancel the active query, if any
-	inTx      bool
-	tx        *sql.Tx
+	mu         sync.Mutex
+	cancelFn   context.CancelFunc // cancel the active query, if any
+	inTx       bool
+	tx         *sql.Tx
 	autoCommit bool
 }
 
@@ -116,6 +118,43 @@ func (s *Session) Execute(ctx context.Context, query string) ([]QueryResult, err
 	return results, rows.Err()
 }
 
+// Explain returns estimated/non-executing plan output for each explainable SQL unit.
+func (s *Session) Explain(ctx context.Context, query string) ([]QueryResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
+	s.mu.Lock()
+	s.cancelFn = cancel
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.cancelFn = nil
+		s.mu.Unlock()
+		cancel()
+	}()
+
+	if s.Driver == nil {
+		return nil, fmt.Errorf("explain: no active driver")
+	}
+
+	statements := splitExplainStatements(query)
+	if len(statements) == 0 {
+		return nil, fmt.Errorf("explain: empty query")
+	}
+
+	results := make([]QueryResult, 0, len(statements))
+	for _, statement := range statements {
+		start := time.Now()
+		plan, err := s.Driver.ExplainQuery(ctx, s.DB, statement)
+		if err != nil {
+			return nil, fmt.Errorf("explain: %w", err)
+		}
+		results = append(results, explainPlanResult(plan, time.Since(start)))
+	}
+
+	return results, nil
+}
+
 // CancelActive cancels the currently running query, if any.
 func (s *Session) CancelActive() {
 	s.mu.Lock()
@@ -182,4 +221,52 @@ func (s *Session) Close() error {
 // Introspect returns the schema tree for the connected database.
 func (s *Session) Introspect(ctx context.Context) (*Schema, error) {
 	return s.Driver.Introspect(ctx, s.DB)
+}
+
+func splitExplainStatements(query string) []string {
+	lines := strings.Split(query, "\n")
+	parts := make([]string, 0, 4)
+	current := make([]string, 0, len(lines))
+	flush := func() {
+		statement := strings.TrimSpace(strings.Join(current, "\n"))
+		if statement != "" {
+			parts = append(parts, statement)
+		}
+		current = current[:0]
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.EqualFold(trimmed, "GO"):
+			flush()
+		case trimmed == "":
+			flush()
+		default:
+			current = append(current, line)
+			if strings.HasSuffix(trimmed, ";") {
+				flush()
+			}
+		}
+	}
+	flush()
+	return parts
+}
+
+func explainPlanResult(plan string, duration time.Duration) QueryResult {
+	plan = strings.ReplaceAll(plan, "\r\n", "\n")
+	plan = strings.TrimSpace(plan)
+	rows := [][]any{{"(no plan output)"}}
+	if plan != "" {
+		lines := strings.Split(plan, "\n")
+		rows = make([][]any, 0, len(lines))
+		for _, line := range lines {
+			rows = append(rows, []any{line})
+		}
+	}
+	return QueryResult{
+		Columns:  []Column{{Name: "Plan", Type: "TEXT", Nullable: true}},
+		Rows:     rows,
+		Duration: duration,
+	}
 }

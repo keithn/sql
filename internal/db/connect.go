@@ -16,7 +16,7 @@ func Connect(ctx context.Context, driverName, dsn string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Driver: driver, DB: sqlDB}, nil
+	return &Session{Driver: driver, DriverName: driverName, DB: sqlDB}, nil
 }
 
 // DetectAndConnect detects the driver from the connection string and opens a

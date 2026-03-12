@@ -1,6 +1,6 @@
 ## sql outstanding work plan
 
-Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validation updates)
+Last updated: 2026-03-11 (after IDENTITY_INSERT refactor action)
 
 ### Status key
 - `[x]` done
@@ -16,8 +16,8 @@ Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validati
 - `[~]` Editor roadmap: major UX/tooling slices are now landed, including vim support, refactors, JOIN inference, query-block navigation, and schema-aware validation
 - `[x]` Configuration loader now extracts connections, editor, keys, theme, and startup settings from `config.lua`
 - `[x]` Saved/named connection flow is now wired for raw DSNs, config profiles, keychain-backed managed connections, and last-used named connection restore
-- `[~]` Connection surfaces now include a switcher palette and an in-app add-connection modal; general command palette work is still outstanding
-- `[~]` UX surfaces now include connection management and a help/settings overlay; command/history/export surfaces are still outstanding
+- `[x]` Connection surfaces now include a switcher palette, in-app add-connection modal, and general command palette
+- `[~]` UX surfaces now include connection management, help/settings, and query history; export/result follow-ups are still outstanding
 
 ### Priority order
 
@@ -37,14 +37,16 @@ Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validati
 - `[x]` Connection switcher palette (`Ctrl+K`)
 - `[x]` In-app add connection modal (from `Ctrl+N` outside editor or from switcher)
 - `[x]` Help/settings overlay (`F1`)
-- `[ ]` Command palette (`Ctrl+P`)
+- `[x]` Command palette (`Ctrl+P`)
 - `[~]` Modal wiring needed to support add/select/confirm flows
 
 #### P1 — execution workflow gaps
-- `[ ]` Query history store (`history.db`)
-- `[ ]` History palette (`Ctrl+H`)
-- `[ ]` Transaction mode toggle + commit / rollback UI wiring
-- `[ ]` Status bar updates for row count / duration / transaction state
+- `[x]` Query history store (`history.db`)
+- `[x]` History palette (`Ctrl+H`)
+- `[x]` Transaction mode toggle + commit / rollback UI wiring
+- `[x]` Status bar updates for row count / duration / transaction state
+- `[x]` Explain current block / full buffer commands via command palette
+- `[x]` Explicit run current block / full buffer in transaction commands via command palette
 
 #### P1 — editor and query tooling gaps
 - `[x]` Wire formatter into editor commands
@@ -55,7 +57,7 @@ Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validati
 - `[x]` Add `Ctrl+R` refactors for converting `SELECT` ↔ `UPDATE` and appending the opposite form beneath the active statement, including conservative join-aware handling
 - `[x]` Add `Alt+Up` / `Alt+Down` query-block navigation
 - `[x]` Highlight missing table/view names and missing qualified columns in red when schema metadata proves they do not exist
-- `[ ]` Finish query execution modes beyond current block/buffer behavior
+- `[x]` Finish query execution modes beyond current block/buffer behavior
 
 #### P2 — schema and results UX
 - `[ ]` Schema browser fuzzy filter
@@ -77,10 +79,9 @@ Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validati
 - `[ ]` Advanced export / remote clipboard / edit mode follow-ups
 
 ### Immediate next step
-1. Build the command palette (`Ctrl+P`) on top of the new palette infrastructure.
-2. Then move to the history store + history palette (`Ctrl+H`).
-3. Then return to remaining execution workflow gaps and broader modal/palette flows.
-4. Keep updating this file after each completed slice.
+1. Return to remaining broader modal/palette polish.
+2. Then move into schema/results export follow-ups.
+3. Then keep updating this file after each completed slice.
 
 ### Progress log
 - `2026-03-11`: Created this plan and started work on the P0 saved/named connection slice.
@@ -99,3 +100,9 @@ Last updated: 2026-03-11 (after editor refactor, navigation, and schema-validati
 - `2026-03-11`: Landed a broad editor UX/tooling pass: improved JOIN ranking and labels; added SQL Server FK introspection plus stronger heuristic matching for prefixed, underscored, and self-referential keys; fixed vim insert-mode `Delete`; added compact visually lighter JOIN popup details; and added `Alt+Up` / `Alt+Down` query-block navigation with robust first/last-block no-op behavior.
 - `2026-03-11`: Added conservative schema-aware validation/highlighting in the editor so missing table/view names and missing qualified columns render in an error color when loaded schema metadata proves they do not exist.
 - `2026-03-11`: Expanded the editor refactor popup with `E` to expand top-level `SELECT *`, and with `u` / `U` / `s` / `S` to convert between `SELECT` and `UPDATE` statements or append the opposite form beneath the active block. The new `SELECT → UPDATE` path preserves `FROM` / `JOIN` / `WHERE` structure conservatively for joined statements and only scaffolds `SET` entries for the target table.
+- `2026-03-11`: Generalized the palette infrastructure beyond the connection switcher and added a `Ctrl+P` command palette with help, connection, pane-focus, vim-mode, and tab-management actions, while preserving connection-switcher quick-add behavior.
+- `2026-03-11`: Added a persistent query history store at `workspace/history.db`, recorded block/buffer execution into it, and added a `Ctrl+H` history palette that filters recent SQL and pastes the selected query into the editor.
+- `2026-03-11`: Polished execution workflow state by wiring transaction begin / commit / rollback actions into the app and command palette, and by updating the status bar with transaction state, total row count, and query duration after execution.
+- `2026-03-11`: Added non-executing explain-plan support across SQLite, PostgreSQL, and SQL Server drivers, surfaced it as `Explain current block` / `Explain full buffer` command-palette actions, and rendered explain output in the normal results pane with one result set per explainable statement.
+- `2026-03-11`: Added explicit `Run current block in transaction` and `Run full buffer in transaction` command-palette actions. They begin a transaction if needed, execute inside the transaction, leave it open for manual commit/rollback, reuse confirmation for full-buffer runs, record history as `BLOCK_TX` / `BUFFER_TX`, and were validated with focused app regressions plus full test/build runs.
+- `2026-03-11`: Added a conservative `Ctrl+R` → `i` editor refactor that wraps the active `INSERT [INTO] <table>` block with `SET IDENTITY_INSERT <table> ON/OFF`, preserving qualified/bracketed table names, working in both textarea and vim modes, and leaving non-INSERT blocks unchanged.

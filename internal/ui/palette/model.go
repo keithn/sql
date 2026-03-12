@@ -13,18 +13,37 @@ import (
 type Item struct {
 	Key     string
 	Title   string
+	Badge   string
 	Driver  string
 	Summary string
+	Search  string
 }
 
-type AcceptedMsg struct{ Key string }
+type Kind int
+
+const (
+	KindNone Kind = iota
+	KindConnections
+	KindCommands
+	KindHistory
+	KindExport
+)
+
+type AcceptedMsg struct {
+	Key  string
+	Kind Kind
+}
+
 type CancelledMsg struct{}
 
 type Model struct {
 	active   bool
+	kind     Kind
 	title    string
 	width    int
 	height   int
+	empty    string
+	footer   string
 	input    textinput.Model
 	items    []Item
 	filtered []Item
@@ -43,16 +62,45 @@ var (
 func New() Model {
 	input := textinput.New()
 	input.Prompt = "> "
-	input.Placeholder = "Filter connections"
+	input.Placeholder = "Filter"
 	input.CharLimit = 256
 	input.PromptStyle = promptStyle
-	return Model{title: "Connections", input: input}
+	return Model{title: "Palette", input: input, empty: "No matches", footer: "Enter select • Esc close"}
 }
 
 func (m Model) Active() bool { return m.active }
 
+func (m Model) Kind() Kind { return m.kind }
+
+func (m Model) QuickAddEnabled() bool { return m.kind == KindConnections }
+
 func (m Model) OpenConnections(items []Item) (Model, tea.Cmd) {
+	return m.open(KindConnections, "Connections", "Filter connections", "No matching connections", "Enter connect • Ctrl+N/A add connection • Esc close", items)
+}
+
+func (m Model) OpenCommands(items []Item) (Model, tea.Cmd) {
+	return m.open(KindCommands, "Commands", "Filter commands", "No matching commands", "Enter run • Esc close", items)
+}
+
+func (m Model) OpenHistory(items []Item) (Model, tea.Cmd) {
+	return m.open(KindHistory, "History", "Filter query history", "No matching history", "Enter paste into editor • Esc close", items)
+}
+
+func (m Model) OpenExport(items []Item, dest string) (Model, tea.Cmd) {
+	footer := "Enter copy to clipboard • Tab switch to file • Esc close"
+	if dest == "file" {
+		footer = "Enter export to file • Tab switch to clipboard • Esc close"
+	}
+	return m.open(KindExport, "Export → "+dest, "Filter formats", "No formats", footer, items)
+}
+
+func (m Model) open(kind Kind, title, placeholder, empty, footer string, items []Item) (Model, tea.Cmd) {
 	m.active = true
+	m.kind = kind
+	m.title = title
+	m.empty = empty
+	m.footer = footer
+	m.input.Placeholder = placeholder
 	m.items = append([]Item(nil), items...)
 	m.cursor = 0
 	m.input.SetValue("")
@@ -62,6 +110,7 @@ func (m Model) OpenConnections(items []Item) (Model, tea.Cmd) {
 
 func (m Model) Close() Model {
 	m.active = false
+	m.kind = KindNone
 	m.cursor = 0
 	m.input.Blur()
 	m.input.SetValue("")
@@ -111,7 +160,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			item := m.filtered[m.cursor]
-			return m.Close(), func() tea.Msg { return AcceptedMsg{Key: item.Key} }
+			return m.Close(), func() tea.Msg { return AcceptedMsg{Key: item.Key, Kind: m.kind} }
 		}
 	}
 	var cmd tea.Cmd
@@ -130,20 +179,26 @@ func (m Model) View() string {
 		maxItems = 1
 	}
 	if len(m.filtered) == 0 {
-		lines = append(lines, emptyStyle.Render("No matching connections"))
+		lines = append(lines, emptyStyle.Render(m.empty))
 	} else {
+		badgeW := 0
+		for _, item := range m.filtered {
+			if w := len(itemBadge(item)); w > badgeW {
+				badgeW = w
+			}
+		}
 		for i, item := range m.filtered {
 			if i >= maxItems {
 				break
 			}
-			line := fmt.Sprintf("  %s  %-2s  %s", item.Title, driverBadge(item.Driver), metaStyle.Render(item.Summary))
+			line := renderItemLine(item, badgeW)
 			if i == m.cursor {
 				line = selectedStyle.Width(max(0, m.width-4)).Render(strings.TrimRight(line, " "))
 			}
 			lines = append(lines, line)
 		}
 	}
-	lines = append(lines, "", emptyStyle.Render("Enter connect • Ctrl+N/A add connection • Esc close"))
+	lines = append(lines, "", emptyStyle.Render(m.footer))
 	content := strings.Join(lines, "\n")
 	return panelStyle.Width(m.width).Height(m.height).Render(content)
 }
@@ -159,7 +214,7 @@ func (m *Model) syncFiltered() {
 	}
 	targets := make([]string, len(m.items))
 	for i, item := range m.items {
-		targets[i] = item.Title + " " + item.Driver + " " + item.Summary
+		targets[i] = item.Title + " " + itemBadge(item) + " " + item.Driver + " " + item.Summary + " " + item.Search
 	}
 	matches := fuzzy.Find(strings.ToLower(query), lowerAll(targets))
 	filtered := make([]Item, 0, len(matches))
@@ -174,6 +229,30 @@ func (m *Model) syncFiltered() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+}
+
+func renderItemLine(item Item, badgeW int) string {
+	badge := itemBadge(item)
+	if badge == "" {
+		if item.Summary == "" {
+			return "  " + item.Title
+		}
+		return fmt.Sprintf("  %s  %s", item.Title, metaStyle.Render(item.Summary))
+	}
+	if item.Summary == "" {
+		return fmt.Sprintf("  %s  %-*s", item.Title, badgeW, badge)
+	}
+	return fmt.Sprintf("  %s  %-*s  %s", item.Title, badgeW, badge, metaStyle.Render(item.Summary))
+}
+
+func itemBadge(item Item) string {
+	if item.Badge != "" {
+		return item.Badge
+	}
+	if item.Driver != "" {
+		return driverBadge(item.Driver)
+	}
+	return ""
 }
 
 func lowerAll(in []string) []string {

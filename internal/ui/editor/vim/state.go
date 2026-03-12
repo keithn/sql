@@ -338,6 +338,14 @@ func (s *State) handleNormal(key string) bool {
 			s.Buf.DeleteCharBefore()
 		}
 		s.resetMotion()
+	case "D": // delete to end of line (= d$)
+		s.Buf.PushUndo()
+		s.Buf.DeleteToEndOfLine()
+		s.resetMotion()
+	case "C": // change to end of line (= c$)
+		s.Buf.PushUndo()
+		s.Buf.DeleteToEndOfLine()
+		s.Mode = ModeInsert
 	case "d":
 		s.operatorCount = n
 		s.operator = 'd'

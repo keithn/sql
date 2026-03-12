@@ -31,9 +31,7 @@ type Model struct {
 	width  int
 	height int
 
-	focused     FocusedPane
-	schemaOpen  bool
-	schemaWidth int // overlay width as percentage of total
+	focused FocusedPane
 
 	editor    editor.Model
 	results   results.Model
@@ -43,9 +41,14 @@ type Model struct {
 	statusbar statusbar.Model
 	modal     modal.Model
 
-	activeConn     string
-	session        *db.Session
-	pendingConnect string
+	activeConn        string
+	session           *db.Session
+	pendingConnect    string
+	pendingBuffer     string
+	pendingBufferTx   bool
+	exportToClipboard    bool   // true = copy to clipboard (default), false = write to file
+	screenshotToClipboard bool  // F10 destination: true = clipboard (default), false = file; toggles each press
+	lastSQL              string // most recently executed SQL, used for export table name inference
 
 	ws    *workspace.Workspace
 	wsDir string // connDir for the active connection
@@ -57,8 +60,9 @@ func New(cfg *config.Config, connectTo string) Model {
 	ws := workspace.New(filepath.Join(dataDir, "workspace"))
 
 	m := Model{
-		cfg:         cfg,
-		schemaWidth: 28,
+		cfg:                   cfg,
+		exportToClipboard:     true,
+		screenshotToClipboard: true,
 		editor:      editor.New(cfg),
 		results:     results.New(),
 		help:        uihelp.New(),

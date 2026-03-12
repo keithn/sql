@@ -385,6 +385,11 @@ func (m Model) activeResult() *db.QueryResult {
 	return &m.results[m.active]
 }
 
+// ActiveResult returns a copy of the currently displayed result set, or nil if none.
+func (m Model) ActiveResult() *db.QueryResult {
+	return m.activeResult()
+}
+
 // computeColWidths scans all rows once to find max display widths, capped at 40.
 func computeColWidths(rs db.QueryResult) []int {
 	widths := make([]int, len(rs.Columns))
@@ -413,15 +418,25 @@ func formatCell(v any) string {
 	if v == nil {
 		return "∅"
 	}
+	var s string
 	if b, ok := v.([]byte); ok {
 		for _, c := range b {
-			if c < 0x20 || c > 0x7E {
+			if c < 0x20 && c != '\n' && c != '\r' && c != '\t' {
+				return fmt.Sprintf("<binary %d bytes>", len(b))
+			}
+			if c > 0x7E {
 				return fmt.Sprintf("<binary %d bytes>", len(b))
 			}
 		}
-		return string(b)
+		s = string(b)
+	} else {
+		s = fmt.Sprintf("%v", v)
 	}
-	return fmt.Sprintf("%v", v)
+	// Collapse embedded newlines so multi-line values don't break the grid layout.
+	s = strings.ReplaceAll(s, "\r\n", "↵")
+	s = strings.ReplaceAll(s, "\r", "↵")
+	s = strings.ReplaceAll(s, "\n", "↵")
+	return s
 }
 
 func runeLen(s string) int {

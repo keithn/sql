@@ -37,6 +37,27 @@ type QueryErrorMsg struct {
 // CancelQueryMsg cancels the in-flight query.
 type CancelQueryMsg struct{}
 
+// BeginTransactionMsg requests entering manual transaction mode.
+type BeginTransactionMsg struct{}
+
+// CommitTransactionMsg requests committing the current transaction.
+type CommitTransactionMsg struct{}
+
+// RollbackTransactionMsg requests rolling back the current transaction.
+type RollbackTransactionMsg struct{}
+
+// ExplainBlockMsg requests an explain plan for the logical block under the cursor.
+type ExplainBlockMsg struct{}
+
+// ExplainBufferMsg requests explain plans for the current buffer.
+type ExplainBufferMsg struct{}
+
+// ExecuteBlockInTransactionMsg requests running the current block in a transaction.
+type ExecuteBlockInTransactionMsg struct{}
+
+// ExecuteBufferInTransactionMsg requests running the full buffer in a transaction.
+type ExecuteBufferInTransactionMsg struct{}
+
 // ConnectMsg requests opening a new connection.
 type ConnectMsg struct {
 	Name string // named connection or raw connection string
@@ -62,6 +83,12 @@ type ToggleVimMsg struct{}
 
 // SchemaLoadedMsg carries the introspected schema after connecting.
 type SchemaLoadedMsg struct {
-	Schema   *db.Schema
-	ConnName string
+	Schema     *db.Schema
+	ConnName   string
+	DriverName string
+}
+
+// SchemaTableSelectedMsg is sent when the user selects a table from the schema browser.
+type SchemaTableSelectedMsg struct {
+	SQL string
 }

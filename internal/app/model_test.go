@@ -1,21 +1,25 @@
 package app
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sqltui/sql/internal/config"
 	"github.com/sqltui/sql/internal/connections"
 	"github.com/sqltui/sql/internal/db"
+	dbsqlite "github.com/sqltui/sql/internal/db/sqlite"
 	"github.com/sqltui/sql/internal/ui/editor"
 	uihelp "github.com/sqltui/sql/internal/ui/help"
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
 	"github.com/sqltui/sql/internal/workspace"
 	keyring "github.com/zalando/go-keyring"
+	_ "modernc.org/sqlite"
 )
 
 func TestNewRestoresLastConnectionWhenNoArgumentProvided(t *testing.T) {
@@ -178,6 +182,9 @@ func TestCtrlKOpensConnectionSwitcherAndQueuesConnectMsg(t *testing.T) {
 	if accepted.Key != "prod" {
 		t.Fatalf("AcceptedMsg.Key = %q, want %q", accepted.Key, "prod")
 	}
+	if accepted.Kind != palette.KindConnections {
+		t.Fatalf("AcceptedMsg.Kind = %v, want %v", accepted.Kind, palette.KindConnections)
+	}
 
 	nm, cmd = m.Update(accepted)
 	m = nm.(Model)
@@ -222,6 +229,562 @@ func TestPaletteCtrlNOpensAddConnectionModal(t *testing.T) {
 	}
 	if !m.modal.Active() {
 		t.Fatalf("modal should be active after Ctrl+N from palette")
+	}
+}
+
+func TestCtrlPOpensCommandPaletteAndRunsHelp(t *testing.T) {
+	m := New(&config.Config{}, "")
+	m.width = 100
+	m.height = 30
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	if !m.palette.Active() {
+		t.Fatalf("palette should be active after Ctrl+P")
+	}
+	if m.palette.Kind() != palette.KindCommands {
+		t.Fatalf("palette kind = %v, want %v", m.palette.Kind(), palette.KindCommands)
+	}
+	if got := m.View(); !strings.Contains(got, "Commands") || !strings.Contains(got, "Connection switcher") {
+		t.Fatalf("command palette view missing expected content: %q", got)
+	}
+
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h', 'e', 'l', 'p'}})
+	m = nm.(Model)
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	msg := cmd()
+	accepted, ok := msg.(palette.AcceptedMsg)
+	if !ok {
+		t.Fatalf("enter should yield palette.AcceptedMsg, got %T", msg)
+	}
+	if accepted.Kind != palette.KindCommands || accepted.Key != commandPaletteHelp {
+		t.Fatalf("AcceptedMsg = %#v, want command help selection", accepted)
+	}
+
+	nm, _ = m.Update(accepted)
+	m = nm.(Model)
+	if !m.help.Active() {
+		t.Fatalf("help should be active after selecting help command")
+	}
+}
+
+func TestCommandPaletteCtrlNMovesSelectionInsteadOfOpeningModal(t *testing.T) {
+	m := New(&config.Config{}, "")
+	m.width = 100
+	m.height = 30
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m = nm.(Model)
+	if !m.palette.Active() {
+		t.Fatalf("command palette should stay active after Ctrl+N navigation")
+	}
+	if m.modal.Active() {
+		t.Fatalf("command palette Ctrl+N should not immediately open add-connection modal")
+	}
+
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	msg := cmd()
+	accepted, ok := msg.(palette.AcceptedMsg)
+	if !ok {
+		t.Fatalf("enter should yield palette.AcceptedMsg, got %T", msg)
+	}
+	if accepted.Key != commandPaletteAddConnection {
+		t.Fatalf("AcceptedMsg.Key = %q, want %q", accepted.Key, commandPaletteAddConnection)
+	}
+
+	nm, _ = m.Update(accepted)
+	m = nm.(Model)
+	if !m.modal.Active() {
+		t.Fatalf("selecting Add connection from command palette should open modal")
+	}
+}
+
+func TestCtrlHOpensHistoryPaletteAndPastesIntoEditor(t *testing.T) {
+	m := New(&config.Config{}, "")
+	m.width = 100
+	m.height = 30
+	m.ws = workspace.New(t.TempDir())
+	m.editor = editor.New(&config.Config{}).SetSize(100, 12).SetTabs([]editor.TabState{{Path: "query1.sql", Content: ""}})
+	if err := m.ws.AppendHistory(workspace.HistoryEntry{Connection: "dev", Mode: "BLOCK", SQL: "select * from tblUser where Name like '%keith%'"}); err != nil {
+		t.Fatalf("AppendHistory() error = %v", err)
+	}
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
+	m = nm.(Model)
+	if !m.palette.Active() {
+		t.Fatalf("history palette should be active after Ctrl+H")
+	}
+	if m.palette.Kind() != palette.KindHistory {
+		t.Fatalf("palette kind = %v, want %v", m.palette.Kind(), palette.KindHistory)
+	}
+
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	msg := cmd()
+	accepted, ok := msg.(palette.AcceptedMsg)
+	if !ok {
+		t.Fatalf("enter should yield palette.AcceptedMsg, got %T", msg)
+	}
+	if accepted.Kind != palette.KindHistory {
+		t.Fatalf("AcceptedMsg.Kind = %v, want %v", accepted.Kind, palette.KindHistory)
+	}
+
+	nm, _ = m.Update(accepted)
+	m = nm.(Model)
+	if got := m.editor.Value(); got != "select * from tblUser where Name like '%keith%'" {
+		t.Fatalf("editor value after history insert = %q", got)
+	}
+	if m.focused != PaneEditor {
+		t.Fatalf("focused pane = %v, want editor after history insert", m.focused)
+	}
+}
+
+func TestExecuteBlockMsgRecordsHistory(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.activeConn = "prod"
+	m.session = &db.Session{DB: dbConn}
+
+	nm, _ := m.Update(editor.ExecuteBlockMsg{SQL: "select 1"})
+	m = nm.(Model)
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].SQL != "select 1" || entries[0].Connection != "prod" || entries[0].Mode != "BLOCK" {
+		t.Fatalf("entries[0] = %#v, want recorded block history entry", entries[0])
+	}
+}
+
+func TestExecuteBufferMsgOpensConfirmationModalBeforeRunning(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.session = &db.Session{DB: dbConn}
+
+	nm, cmd := m.Update(editor.ExecuteBufferMsg{SQL: "select 1; select 2"})
+	m = nm.(Model)
+	if cmd != nil {
+		t.Fatalf("ExecuteBufferMsg should not immediately start execution when confirmation is required")
+	}
+	if !m.modal.Active() {
+		t.Fatalf("confirmation modal should be active after full-buffer execute request")
+	}
+	if got := m.View(); !strings.Contains(got, "Run full buffer?") {
+		t.Fatalf("confirmation modal view missing title: %q", got)
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("history should remain empty until confirmation, got %d entries", len(entries))
+	}
+}
+
+func TestExecuteBufferConfirmationRunsAndRecordsHistory(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.activeConn = "prod"
+	m.session = &db.Session{DB: dbConn}
+
+	nm, _ := m.Update(editor.ExecuteBufferMsg{SQL: "select 1; select 2"})
+	m = nm.(Model)
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	msg := cmd()
+	confirmed, ok := msg.(modal.ConfirmedMsg)
+	if !ok {
+		t.Fatalf("confirm enter returned %T, want modal.ConfirmedMsg", msg)
+	}
+	nm, execCmd := m.Update(confirmed)
+	m = nm.(Model)
+	if execCmd == nil {
+		t.Fatalf("confirmed full-buffer run should queue execution command")
+	}
+	if m.modal.Active() {
+		t.Fatalf("confirmation modal should close after confirm")
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].SQL != "select 1; select 2" || entries[0].Mode != "BUFFER" || entries[0].Connection != "prod" {
+		t.Fatalf("entries[0] = %#v, want recorded confirmed buffer history entry", entries[0])
+	}
+}
+
+func TestExecuteBufferConfirmationCancelDoesNotRun(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.session = &db.Session{DB: dbConn}
+
+	nm, _ := m.Update(editor.ExecuteBufferMsg{SQL: "select 1; select 2"})
+	m = nm.(Model)
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = nm.(Model)
+	msg := cmd()
+	if _, ok := msg.(modal.CancelledMsg); !ok {
+		t.Fatalf("esc returned %T, want modal.CancelledMsg", msg)
+	}
+	nm, execCmd := m.Update(msg)
+	m = nm.(Model)
+	if execCmd != nil {
+		t.Fatalf("cancelled full-buffer run should not queue execution command")
+	}
+	if m.modal.Active() {
+		t.Fatalf("confirmation modal should close after cancel")
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("history should stay empty after cancellation, got %d entries", len(entries))
+	}
+}
+
+func TestCommandPaletteShowsRunInTransactionCommandsWhenConnected(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn}
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = nm.(Model)
+
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("transaction")})
+	m = nm.(Model)
+	if got := m.View(); !strings.Contains(got, "Run current block in transaction") || !strings.Contains(got, "Run full buffer in transaction") {
+		t.Fatalf("command palette view missing run-in-transaction actions: %q", got)
+	}
+}
+
+func TestExecuteBlockInTransactionBeginsTransactionAndRecordsHistory(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.activeConn = "prod"
+	m.session = &db.Session{DB: dbConn}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{Path: "query1.sql", Content: "select 1"}})
+
+	nm, cmd := m.Update(ExecuteBlockInTransactionMsg{})
+	m = nm.(Model)
+	if cmd == nil {
+		t.Fatalf("ExecuteBlockInTransactionMsg should queue execution command")
+	}
+	if !m.session.InTransaction() {
+		t.Fatalf("transaction should be active before executing block")
+	}
+	msg := cmd()
+	if _, ok := msg.(QueryDoneMsg); !ok {
+		t.Fatalf("transaction block command returned %T, want QueryDoneMsg", msg)
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].Mode != "BLOCK_TX" || entries[0].SQL != "select 1" || entries[0].Connection != "prod" {
+		t.Fatalf("entries[0] = %#v, want recorded transaction block history entry", entries[0])
+	}
+	if got := m.statusbar.View(); !strings.Contains(got, "TXN") {
+		t.Fatalf("statusbar should show TXN after transaction execution start: %q", got)
+	}
+}
+
+func TestExecuteBufferInTransactionOpensConfirmationModal(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{Path: "query1.sql", Content: "select 1; select 2"}})
+
+	nm, cmd := m.Update(ExecuteBufferInTransactionMsg{})
+	m = nm.(Model)
+	if cmd != nil {
+		t.Fatalf("ExecuteBufferInTransactionMsg should wait for confirmation before executing")
+	}
+	if !m.modal.Active() {
+		t.Fatalf("confirmation modal should be active for full-buffer transaction run")
+	}
+	if got := m.View(); !strings.Contains(got, "Run full buffer in transaction?") {
+		t.Fatalf("confirmation modal view missing transaction title: %q", got)
+	}
+	if m.session.InTransaction() {
+		t.Fatalf("transaction should not begin before confirmation")
+	}
+}
+
+func TestExecuteBufferInTransactionConfirmationRunsAndLeavesTransactionOpen(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.activeConn = "prod"
+	m.session = &db.Session{DB: dbConn}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{Path: "query1.sql", Content: "select 1; select 2"}})
+
+	nm, _ := m.Update(ExecuteBufferInTransactionMsg{})
+	m = nm.(Model)
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	msg := cmd()
+	confirmed, ok := msg.(modal.ConfirmedMsg)
+	if !ok {
+		t.Fatalf("confirm enter returned %T, want modal.ConfirmedMsg", msg)
+	}
+	nm, execCmd := m.Update(confirmed)
+	m = nm.(Model)
+	if execCmd == nil {
+		t.Fatalf("confirmed transaction buffer run should queue execution command")
+	}
+	if !m.session.InTransaction() {
+		t.Fatalf("transaction should be active after confirming full-buffer transaction run")
+	}
+	resultMsg := execCmd()
+	if _, ok := resultMsg.(QueryDoneMsg); !ok {
+		t.Fatalf("transaction buffer command returned %T, want QueryDoneMsg", resultMsg)
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].Mode != "BUFFER_TX" || entries[0].SQL != "select 1; select 2" || entries[0].Connection != "prod" {
+		t.Fatalf("entries[0] = %#v, want recorded transaction buffer history entry", entries[0])
+	}
+}
+
+func TestExecuteBufferInTransactionConfirmationCancelDoesNotBeginTransaction(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.ws = workspace.New(t.TempDir())
+	m.session = &db.Session{DB: dbConn}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{Path: "query1.sql", Content: "select 1; select 2"}})
+
+	nm, _ := m.Update(ExecuteBufferInTransactionMsg{})
+	m = nm.(Model)
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = nm.(Model)
+	msg := cmd()
+	if _, ok := msg.(modal.CancelledMsg); !ok {
+		t.Fatalf("esc returned %T, want modal.CancelledMsg", msg)
+	}
+	nm, execCmd := m.Update(msg)
+	m = nm.(Model)
+	if execCmd != nil {
+		t.Fatalf("cancelled transaction buffer run should not queue execution command")
+	}
+	if m.session.InTransaction() {
+		t.Fatalf("transaction should not begin after cancelling full-buffer transaction run")
+	}
+	entries, err := m.ws.LoadHistory(10)
+	if err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("history should stay empty after cancellation, got %d entries", len(entries))
+	}
+}
+
+func TestCommandPaletteShowsExplainCommandsWhenConnected(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn, Driver: &dbsqlite.Driver{}}
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = nm.(Model)
+
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("explain")})
+	m = nm.(Model)
+	if got := m.View(); !strings.Contains(got, "Explain current block") || !strings.Contains(got, "Explain full buffer") {
+		t.Fatalf("command palette view missing explain actions: %q", got)
+	}
+}
+
+func TestExplainBlockMsgReturnsPlanResults(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn, Driver: &dbsqlite.Driver{}}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{
+		Path:       "query1.sql",
+		Content:    "select 1;\n\nselect 2;",
+		CursorLine: 2,
+		CursorCol:  3,
+	}})
+
+	nm, cmd := m.Update(ExplainBlockMsg{})
+	m = nm.(Model)
+	if cmd == nil {
+		t.Fatalf("ExplainBlockMsg should queue an explain command")
+	}
+	msg := cmd()
+	done, ok := msg.(QueryDoneMsg)
+	if !ok {
+		t.Fatalf("explain command returned %T, want QueryDoneMsg", msg)
+	}
+	if len(done.Results) != 1 {
+		t.Fatalf("len(done.Results) = %d, want 1", len(done.Results))
+	}
+	if len(done.Results[0].Columns) != 1 || done.Results[0].Columns[0].Name != "Plan" {
+		t.Fatalf("explain columns = %#v, want single Plan column", done.Results[0].Columns)
+	}
+}
+
+func TestExplainBufferMsgSplitsFullBufferIntoMultipleResultSets(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn, Driver: &dbsqlite.Driver{}}
+	m.editor = editor.New(&config.Config{}).SetTabs([]editor.TabState{{
+		Path:    "query1.sql",
+		Content: "select 1;\n\nselect 2;",
+	}})
+
+	nm, cmd := m.Update(ExplainBufferMsg{})
+	m = nm.(Model)
+	if cmd == nil {
+		t.Fatalf("ExplainBufferMsg should queue an explain command")
+	}
+	msg := cmd()
+	done, ok := msg.(QueryDoneMsg)
+	if !ok {
+		t.Fatalf("explain command returned %T, want QueryDoneMsg", msg)
+	}
+	if len(done.Results) != 2 {
+		t.Fatalf("len(done.Results) = %d, want 2 result sets for split full-buffer explain", len(done.Results))
+	}
+}
+
+func TestCommandPaletteShowsBeginTransactionWhenConnected(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.session = &db.Session{DB: dbConn}
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = nm.(Model)
+
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	m = nm.(Model)
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("transaction")})
+	m = nm.(Model)
+	if got := m.View(); !strings.Contains(got, "Begin transaction") {
+		t.Fatalf("command palette view missing transaction action: %q", got)
+	}
+}
+
+func TestBeginAndCommitTransactionUpdateStatusbar(t *testing.T) {
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer dbConn.Close()
+
+	m := New(&config.Config{}, "")
+	m.statusbar = m.statusbar.SetWidth(120)
+	m.session = &db.Session{DB: dbConn}
+
+	nm, _ := m.Update(BeginTransactionMsg{})
+	m = nm.(Model)
+	if got := m.statusbar.View(); !strings.Contains(got, "TXN") {
+		t.Fatalf("statusbar after begin tx missing TXN indicator: %q", got)
+	}
+
+	nm, _ = m.Update(CommitTransactionMsg{})
+	m = nm.(Model)
+	if got := m.statusbar.View(); strings.Contains(got, "TXN") {
+		t.Fatalf("statusbar after commit should clear TXN indicator: %q", got)
+	}
+}
+
+func TestQueryDoneUpdatesStatusbarRowsAndDuration(t *testing.T) {
+	m := New(&config.Config{}, "")
+	m.statusbar = m.statusbar.SetWidth(120)
+
+	nm, _ := m.Update(QueryDoneMsg{Results: []db.QueryResult{{Rows: [][]any{{1}, {2}}, Duration: 1500 * time.Millisecond}}})
+	m = nm.(Model)
+	if got := m.statusbar.View(); !strings.Contains(got, "2 rows  1500ms") {
+		t.Fatalf("statusbar after query done missing rows/duration: %q", got)
 	}
 }
 
@@ -381,22 +944,17 @@ func TestMouseClickFocusesResultsPane(t *testing.T) {
 	}
 }
 
-func TestMouseClickFocusesSchemaPaneWhenOpen(t *testing.T) {
+func TestSchemaBrowserPopupOpens(t *testing.T) {
 	m := New(&config.Config{}, "")
 	m.width = 100
 	m.height = 30
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = nm.(Model)
-	nm, _ = m.toggleSchema()
+	nm, _ = m.openSchemaBrowser()
 	m = nm.(Model)
 
-	nm, _ = m.Update(tea.MouseMsg{X: 5, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	m = nm.(Model)
-	if !m.schemaOpen {
-		t.Fatalf("schema should remain open after clicking schema pane")
-	}
-	if m.focused != PaneSchema {
-		t.Fatalf("focused pane after clicking schema = %v, want %v", m.focused, PaneSchema)
+	if !m.schema.Active() {
+		t.Fatalf("schema popup should be active after openSchemaBrowser()")
 	}
 }
 

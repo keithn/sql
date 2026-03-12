@@ -39,3 +39,17 @@ func TestAddConnectionModalRequiresNameWhenSaving(t *testing.T) {
 		t.Fatalf("expected validation error for missing name")
 	}
 }
+
+func TestConfirmModalSubmitReturnsConfirmedMsg(t *testing.T) {
+	m, _ := New().SetSize(60, 10).OpenConfirm("run_full_buffer", "Run full buffer?", "Execute everything?", "Run")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd()
+	confirmed, ok := msg.(ConfirmedMsg)
+	if !ok {
+		t.Fatalf("submit returned %T, want ConfirmedMsg", msg)
+	}
+	if confirmed.ID != "run_full_buffer" {
+		t.Fatalf("confirmed.ID = %q, want %q", confirmed.ID, "run_full_buffer")
+	}
+}

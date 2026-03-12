@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/sqltui/sql/internal/db"
 	_ "modernc.org/sqlite"
@@ -126,6 +127,23 @@ func (d *Driver) ExpandStar(ctx context.Context, conn *sql.DB, schema, table str
 }
 
 func (d *Driver) ExplainQuery(ctx context.Context, conn *sql.DB, query string) (string, error) {
-	// TODO: EXPLAIN QUERY PLAN ...
-	return "", fmt.Errorf("sqlite: ExplainQuery not yet implemented")
+	rows, err := conn.QueryContext(ctx, "EXPLAIN QUERY PLAN "+strings.TrimSpace(query))
+	if err != nil {
+		return "", fmt.Errorf("sqlite: explain: %w", err)
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var id, parent, aux int
+		var detail string
+		if err := rows.Scan(&id, &parent, &aux, &detail); err != nil {
+			return "", fmt.Errorf("sqlite: explain scan: %w", err)
+		}
+		lines = append(lines, fmt.Sprintf("[%d:%d] %s", id, parent, detail))
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("sqlite: explain rows: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
 }

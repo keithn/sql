@@ -9,8 +9,10 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 - **Multi-database** — SQL Server, PostgreSQL, SQLite (pure Go, no CGo)
 - **Named/saved connections** — raw DSNs, saved connections, keychain-backed passwords, and last-used connection restore
 - **Connection management in-app** — `Ctrl+K` connection switcher, plus add/save/connect flow from inside the TUI
-- **Smart block execution** — `Ctrl+E` runs the logical statement under the cursor; `F5` runs the full buffer
-- **Editor refactors and formatting** — active-block formatting plus `Ctrl+R` refactors for aliasing, `SELECT *` expansion, and `SELECT`/`UPDATE` conversions
+- **Command + history palettes** — `Ctrl+P` for app actions and `Ctrl+H` for recent executed SQL
+- **Smart block execution** — `Ctrl+E` runs the logical statement under the cursor; `F5` confirms before running the full buffer
+- **Execution workflow state** — status bar shows transaction state, row counts, and query duration; transactions can be started/committed/rolled back, explain plans can be run, and current block/full buffer can be executed directly inside a transaction from the command palette
+- **Editor refactors and formatting** — active-block formatting plus `Ctrl+R` refactors for aliasing, `SELECT *` expansion, `SELECT`/`UPDATE` conversions, and SQL Server `IDENTITY_INSERT` wrapping for `INSERT` blocks
 - **Schema-aware SQL assistance** — autocomplete, JOIN predicate inference, and missing table/qualified-column highlighting
 - **Syntax highlighting** — SQL highlighted as you type, with schema-aware missing-name highlighting when metadata is available
 - **Schema browser** — `Ctrl+B` / `F2` to toggle a left-side tree of tables and columns
@@ -86,10 +88,12 @@ Passwords are never displayed in the UI.
 | Key | Action |
 |-----|--------|
 | `F1` | Help / settings overlay |
+| `Ctrl+P` | Command palette |
+| `Ctrl+H` | Query history palette |
 | `Ctrl+K` | Connection switcher |
 | `Ctrl+E` | Execute block under cursor |
 | `Ctrl+Shift+F` / `Ctrl+F` | Format active block |
-| `F5` | Execute full buffer |
+| `F5` | Confirm, then execute full buffer |
 | `F3` / `Alt+1` | Focus editor |
 | `F4` / `Alt+2` | Focus results |
 | `Ctrl+B` / `F2` | Toggle schema browser |
@@ -115,6 +119,17 @@ Refactor popup actions currently include:
 - `E` — expand top-level `SELECT *`
 - `u` / `U` — convert current `SELECT` to `UPDATE`, or append an `UPDATE` below it
 - `s` / `S` — convert current `UPDATE` to `SELECT`, or append a `SELECT` below it
+- `i` — wrap current `INSERT` with `SET IDENTITY_INSERT <table> ON/OFF`
+
+When connected, the command palette also exposes transaction actions:
+
+- begin transaction
+- commit transaction
+- rollback transaction
+- run current block in transaction
+- run full buffer in transaction
+- explain current block
+- explain full buffer
 
 ### Results
 

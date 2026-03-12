@@ -75,8 +75,8 @@ func TestUpdateCtrlROpensRefactorPopup(t *testing.T) {
 	if !m.popup.visible || m.popup.mode != popupModeRefactor {
 		t.Fatalf("expected visible refactor popup after ctrl+r")
 	}
-	if got := ansi.Strip(m.renderPopup()); !strings.Contains(got, "Name table alias") || !strings.Contains(got, "Expand *") || !strings.Contains(got, "Convert SELECT to UPDATE") || !strings.Contains(got, "Add UPDATE below") || !strings.Contains(got, "Convert UPDATE to SELECT") || !strings.Contains(got, "Add SELECT below") || !strings.Contains(got, "u") || !strings.Contains(got, "U") || !strings.Contains(got, "s") || !strings.Contains(got, "S") {
-		t.Fatalf("refactor popup render = %q, want alias/expand/select-update actions with shortcuts", got)
+	if got := ansi.Strip(m.renderPopup()); !strings.Contains(got, "Name table alias") || !strings.Contains(got, "Expand *") || !strings.Contains(got, "Convert SELECT to UPDATE") || !strings.Contains(got, "Add UPDATE below") || !strings.Contains(got, "Convert UPDATE to SELECT") || !strings.Contains(got, "Add SELECT below") || !strings.Contains(got, "Wrap INSERT with IDENTITY_INSERT") || !strings.Contains(got, "u") || !strings.Contains(got, "U") || !strings.Contains(got, "s") || !strings.Contains(got, "S") || !strings.Contains(got, "i") {
+		t.Fatalf("refactor popup render = %q, want alias/expand/select-update/identity-insert actions with shortcuts", got)
 	}
 }
 
@@ -379,6 +379,65 @@ func TestUpdateCtrlRThenuVimConvertsSelectStarToUpdateUsingSchema(t *testing.T) 
 	want := "UPDATE tblUser\nSET\n    Id = Id,\n    Name = Name\nwhere Name like '%keith%'"
 	if got := m.tabs[0].vim.Buf.Value(); got != want {
 		t.Fatalf("vim value after select-star -> update refactor = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateCtrlRTheniWrapsInsertWithIdentityInsertCurrentBlockOnly(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "insert into dbo.tblUser (Id, Name)\nvalues (1, 'alice')\n\nselect 2",
+	}})
+	setTextareaCursor(&m.tabs[0].ta, 1, 8)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m = nm
+
+	want := "SET IDENTITY_INSERT dbo.tblUser ON\ninsert into dbo.tblUser (Id, Name)\nvalues (1, 'alice')\nSET IDENTITY_INSERT dbo.tblUser OFF\n\nselect 2"
+	if got := m.tabs[0].ta.Value(); got != want {
+		t.Fatalf("textarea value after identity-insert refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after identity-insert action")
+	}
+}
+
+func TestUpdateCtrlRTheniVimWrapsBracketedInsertWithIdentityInsert(t *testing.T) {
+	cfg := testConfig()
+	cfg.Editor.VimMode = true
+	m := New(cfg)
+	m = m.SetSize(100, 10)
+	m = m.SetTabs([]TabState{{
+		Path:    "query1.sql",
+		Content: "INSERT INTO [dbo].[tblUser] ([Id], [Name])\nVALUES (1, 'alice')",
+	}})
+	m.tabs[0].vim.Buf.SetCursor(1, 4)
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = nm
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m = nm
+
+	want := "SET IDENTITY_INSERT [dbo].[tblUser] ON\nINSERT INTO [dbo].[tblUser] ([Id], [Name])\nVALUES (1, 'alice')\nSET IDENTITY_INSERT [dbo].[tblUser] OFF"
+	if got := m.tabs[0].vim.Buf.Value(); got != want {
+		t.Fatalf("vim value after identity-insert refactor = %q, want %q", got, want)
+	}
+	if m.popup.visible {
+		t.Fatalf("refactor popup should close after identity-insert action in vim mode")
+	}
+}
+
+func TestApplyIdentityInsertRefactorLeavesNonInsertUnchanged(t *testing.T) {
+	text := "select 1"
+	updated, nextLine, nextCol, changed := applyIdentityInsertRefactor(text, 0, 4)
+	if changed {
+		t.Fatalf("applyIdentityInsertRefactor() changed non-insert block: %q", updated)
+	}
+	if updated != text || nextLine != 0 || nextCol != 4 {
+		t.Fatalf("applyIdentityInsertRefactor() = (%q,%d,%d,%v), want unchanged text/cursor", updated, nextLine, nextCol, changed)
 	}
 }
 

@@ -275,7 +275,59 @@ func (d *Driver) ExpandStar(ctx context.Context, conn *sql.DB, schema, table str
 	return nil, fmt.Errorf("mssql: ExpandStar not yet implemented")
 }
 
-func (d *Driver) ExplainQuery(ctx context.Context, conn *sql.DB, query string) (string, error) {
-	// TODO: SET SHOWPLAN_TEXT ON; execute; SET SHOWPLAN_TEXT OFF
-	return "", fmt.Errorf("mssql: ExplainQuery not yet implemented")
+func (d *Driver) ExplainQuery(ctx context.Context, conn *sql.DB, query string) (plan string, err error) {
+	sqlConn, err := conn.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("mssql: explain acquire conn: %w", err)
+	}
+	defer sqlConn.Close()
+
+	if _, err = sqlConn.ExecContext(ctx, "SET SHOWPLAN_TEXT ON"); err != nil {
+		return "", fmt.Errorf("mssql: enable showplan: %w", err)
+	}
+	defer func() {
+		if _, offErr := sqlConn.ExecContext(context.Background(), "SET SHOWPLAN_TEXT OFF"); offErr != nil {
+			if err == nil {
+				err = fmt.Errorf("mssql: disable showplan: %w", offErr)
+			} else {
+				err = fmt.Errorf("%v; additionally failed to disable showplan: %w", err, offErr)
+			}
+		}
+	}()
+
+	rows, err := sqlConn.QueryContext(ctx, strings.TrimSpace(query))
+	if err != nil {
+		return "", fmt.Errorf("mssql: explain query: %w", err)
+	}
+	defer rows.Close()
+
+	var lines []string
+	for {
+		cols, colsErr := rows.Columns()
+		if colsErr != nil {
+			return "", fmt.Errorf("mssql: explain columns: %w", colsErr)
+		}
+		for rows.Next() {
+			values := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				return "", fmt.Errorf("mssql: explain scan: %w", err)
+			}
+			parts := make([]string, 0, len(values))
+			for _, value := range values {
+				parts = append(parts, fmt.Sprint(value))
+			}
+			lines = append(lines, strings.Join(parts, " | "))
+		}
+		if !rows.NextResultSet() {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("mssql: explain rows: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
 }

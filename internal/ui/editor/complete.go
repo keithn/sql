@@ -65,6 +65,8 @@ const popupActionConvertUpdateToSelect popupAction = "convert_update_to_select"
 
 const popupActionAppendSelectBelow popupAction = "append_select_below"
 
+const popupActionWrapIdentityInsert popupAction = "wrap_identity_insert"
+
 type popupItem struct {
 	Text       string
 	InsertText string

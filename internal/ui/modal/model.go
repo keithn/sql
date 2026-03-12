@@ -16,6 +16,7 @@ type AddConnAction int
 const (
 	KindNone Kind = iota
 	KindAddConn
+	KindConfirm
 )
 
 const (
@@ -31,6 +32,8 @@ type AddConnSubmittedMsg struct {
 	Action     AddConnAction
 }
 
+type ConfirmedMsg struct{ ID string }
+
 type CancelledMsg struct{}
 
 type Model struct {
@@ -43,6 +46,10 @@ type Model struct {
 	focus     int
 	action    AddConnAction
 	err       string
+	confirmID string
+	message   string
+	confirm   string
+	cancel    string
 }
 
 var (
@@ -70,6 +77,8 @@ func New() Model {
 		nameInput: nameInput,
 		connInput: connInput,
 		action:    AddConnConnect,
+		confirm:   "Confirm",
+		cancel:    "Cancel",
 	}
 }
 
@@ -105,10 +114,31 @@ func (m Model) OpenAddConnection() (Model, tea.Cmd) {
 	return m, m.nameInput.Focus()
 }
 
+func (m Model) OpenConfirm(id, title, message, confirmLabel string) (Model, tea.Cmd) {
+	m.kind = KindConfirm
+	m.title = title
+	m.confirmID = id
+	m.message = strings.TrimSpace(message)
+	m.confirm = strings.TrimSpace(confirmLabel)
+	if m.confirm == "" {
+		m.confirm = "Confirm"
+	}
+	m.cancel = "Cancel"
+	m.err = ""
+	m.focus = 0
+	m.nameInput.Blur()
+	m.connInput.Blur()
+	return m, nil
+}
+
 func (m Model) Close() Model {
 	m.kind = KindNone
 	m.err = ""
 	m.focus = 0
+	m.confirmID = ""
+	m.message = ""
+	m.confirm = "Confirm"
+	m.cancel = "Cancel"
 	m.nameInput.Blur()
 	m.connInput.Blur()
 	return m
@@ -119,6 +149,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if key, ok := msg.(tea.KeyMsg); ok {
+		if m.kind == KindConfirm {
+			return m.updateConfirm(key)
+		}
 		switch key.String() {
 		case "esc", "ctrl+c":
 			return m.Close(), func() tea.Msg { return CancelledMsg{} }
@@ -164,9 +197,37 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateConfirm(key tea.KeyMsg) (Model, tea.Cmd) {
+	switch key.String() {
+	case "esc", "ctrl+c":
+		return m.Close(), func() tea.Msg { return CancelledMsg{} }
+	case "tab", "shift+tab", "left", "right", "up", "down":
+		m.focus = (m.focus + 1) % 2
+		return m, nil
+	case "enter":
+		if m.focus == 0 {
+			id := m.confirmID
+			return m.Close(), func() tea.Msg { return ConfirmedMsg{ID: id} }
+		}
+		return m.Close(), func() tea.Msg { return CancelledMsg{} }
+	default:
+		return m, nil
+	}
+}
+
 func (m Model) View() string {
 	if !m.Active() {
 		return ""
+	}
+	if m.kind == KindConfirm {
+		return panelStyle.Width(m.width).Height(m.height).Render(strings.Join([]string{
+			titleStyle.Render(m.title),
+			"",
+			m.message,
+			"",
+			m.renderConfirmActions(),
+			helpStyle.Render("←/→ or Tab choose action • Enter confirm • Esc cancel"),
+		}, "\n"))
 	}
 	lines := []string{
 		titleStyle.Render(m.title),
@@ -185,6 +246,19 @@ func (m Model) View() string {
 		lines = append(lines, errStyle.Render(m.err))
 	}
 	return panelStyle.Width(m.width).Height(m.height).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderConfirmActions() string {
+	labels := []string{m.confirm, m.cancel}
+	parts := make([]string, 0, len(labels))
+	for i, label := range labels {
+		style := buttonStyle
+		if m.focus == i {
+			style = activeBtn
+		}
+		parts = append(parts, style.Render(label))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, parts...)
 }
 
 func (m Model) moveFocus(key string) (Model, tea.Cmd) {

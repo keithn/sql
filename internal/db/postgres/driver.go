@@ -206,6 +206,22 @@ func (d *Driver) ExpandStar(ctx context.Context, conn *sql.DB, schema, table str
 }
 
 func (d *Driver) ExplainQuery(ctx context.Context, conn *sql.DB, query string) (string, error) {
-	// TODO: EXPLAIN (FORMAT TEXT) ...
-	return "", fmt.Errorf("postgres: ExplainQuery not yet implemented")
+	rows, err := conn.QueryContext(ctx, "EXPLAIN (FORMAT TEXT) "+strings.TrimSpace(query))
+	if err != nil {
+		return "", fmt.Errorf("postgres: explain: %w", err)
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return "", fmt.Errorf("postgres: explain scan: %w", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("postgres: explain rows: %w", err)
+	}
+	return strings.Join(lines, "\n"), nil
 }

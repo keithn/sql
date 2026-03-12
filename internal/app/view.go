@@ -10,18 +10,16 @@ func (m Model) View() string {
 	// Stack editor, statusbar, and results vertically.
 	content := lipgloss.JoinVertical(lipgloss.Left, editorView, statusView, resultsView)
 
-	// Place schema overlay to the left when open.
-	if m.schemaOpen {
-		schemaView := m.schema.View()
-		content = lipgloss.JoinHorizontal(lipgloss.Top, schemaView, content)
-	}
-
 	if m.modal.Active() {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.modal.View())
 	}
 
 	if m.help.Active() {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.help.View())
+	}
+
+	if m.schema.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.schema.View())
 	}
 
 	if m.palette.Active() {
