@@ -456,7 +456,16 @@ func (b *Buffer) PasteAfter() {
 		if insertAt > len(line) {
 			insertAt = len(line)
 		}
-		ins := []rune(b.register)
+		b.charPasteAt(row, insertAt, line)
+	}
+}
+
+// charPasteAt inserts the (charwise) register at insertAt on row,
+// handling multi-line register content by splitting into new lines.
+func (b *Buffer) charPasteAt(row, insertAt int, line []rune) {
+	parts := splitLines(b.register)
+	if len(parts) == 1 {
+		ins := parts[0]
 		newLine := make([]rune, len(line)+len(ins))
 		copy(newLine, line[:insertAt])
 		copy(newLine[insertAt:], ins)
@@ -465,8 +474,26 @@ func (b *Buffer) PasteAfter() {
 		if len(ins) > 0 {
 			b.col = insertAt + len(ins) - 1
 		}
-		b.clamp()
+	} else {
+		tail := append([]rune(nil), line[insertAt:]...)
+		first := append(append([]rune(nil), line[:insertAt]...), parts[0]...)
+		last := append(append([]rune(nil), parts[len(parts)-1]...), tail...)
+		newLines := make([][]rune, len(b.lines)+len(parts)-1)
+		copy(newLines, b.lines[:row])
+		newLines[row] = first
+		for i := 1; i < len(parts)-1; i++ {
+			newLines[row+i] = append([]rune(nil), parts[i]...)
+		}
+		newLines[row+len(parts)-1] = last
+		copy(newLines[row+len(parts):], b.lines[row+1:])
+		b.lines = newLines
+		b.row = row + len(parts) - 1
+		b.col = len(parts[len(parts)-1])
+		if b.col > 0 {
+			b.col--
+		}
 	}
+	b.clamp()
 }
 
 // PasteBefore pastes the register before the cursor.
@@ -489,16 +516,7 @@ func (b *Buffer) PasteBefore() {
 	} else {
 		row, col := b.row, b.col
 		line := b.lines[row]
-		ins := []rune(b.register)
-		newLine := make([]rune, len(line)+len(ins))
-		copy(newLine, line[:col])
-		copy(newLine[col:], ins)
-		copy(newLine[col+len(ins):], line[col:])
-		b.lines[row] = newLine
-		if len(ins) > 0 {
-			b.col = col + len(ins) - 1
-		}
-		b.clamp()
+		b.charPasteAt(row, col, line)
 	}
 }
 

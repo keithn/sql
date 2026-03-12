@@ -201,6 +201,41 @@ func TestBufferPasteAfterLinewise(t *testing.T) {
 	}
 }
 
+func TestBufferPasteAfterMultilineCharwise(t *testing.T) {
+	b := NewBuffer()
+	b.SetValue("prefix suffix")
+	b.register = "line1\nline2"
+	b.regLine = false
+	b.col = 5 // cursor on 'x' of "prefix", paste after → inserts at col 6
+	b.PasteAfter()
+	got := b.Value()
+	// "prefix" + "line1\nline2" + " suffix"
+	want := "prefixline1\nline2 suffix"
+	if got != want {
+		t.Errorf("multiline charwise PasteAfter: want %q, got %q", want, got)
+	}
+	if b.CursorRow() != 1 {
+		t.Errorf("cursor should be on row 1, got %d", b.CursorRow())
+	}
+}
+
+func TestBufferPasteBeforeMultilineCharwise(t *testing.T) {
+	b := NewBuffer()
+	b.SetValue("prefix suffix")
+	b.register = "line1\nline2"
+	b.regLine = false
+	b.col = 7 // cursor on 's' of "suffix", paste before
+	b.PasteBefore()
+	got := b.Value()
+	want := "prefix line1\nline2suffix"
+	if got != want {
+		t.Errorf("multiline charwise PasteBefore: want %q, got %q", want, got)
+	}
+	if b.CursorRow() != 1 {
+		t.Errorf("cursor should be on row 1, got %d", b.CursorRow())
+	}
+}
+
 func TestBufferUndoRedo(t *testing.T) {
 	b := NewBuffer()
 	b.SetValue("hello")
