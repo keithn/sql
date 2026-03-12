@@ -66,3 +66,20 @@ func TestFormatCell_BinaryBytes(t *testing.T) {
 		t.Fatalf("binary bytes → %q, want <binary ...>", got)
 	}
 }
+
+func TestFormatCell_GUID(t *testing.T) {
+	// MSSQL uniqueidentifier Value() byte-swaps first three groups to big-endian.
+	// The expected string matches SQL Server's display format.
+	b := []byte{
+		0x6F, 0x96, 0x19, 0xFF, // group 1 (4 bytes, already big-endian after Value())
+		0x8B, 0x86, // group 2
+		0xD0, 0x11, // group 3
+		0xB4, 0x2D, // group 4
+		0x00, 0xC0, 0x4F, 0xC9, 0x64, 0xFF, // group 5
+	}
+	got := formatCell(b)
+	want := "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+	if got != want {
+		t.Fatalf("GUID → %q, want %q", got, want)
+	}
+}

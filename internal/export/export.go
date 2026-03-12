@@ -203,11 +203,19 @@ func csvQuote(s string) string {
 	return s
 }
 
+// fmtGUID formats a 16-byte slice as an uppercase GUID string.
+func fmtGUID(b []byte) string {
+	return fmt.Sprintf("%X-%X-%X-%X-%X", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func cellStr(v any) string {
 	if v == nil {
 		return ""
 	}
 	if b, ok := v.([]byte); ok {
+		if len(b) == 16 {
+			return fmtGUID(b)
+		}
 		return string(b)
 	}
 	return fmt.Sprintf("%v", v)
@@ -228,6 +236,9 @@ func sqlLiteral(v any) string {
 		}
 		return "0"
 	case []byte:
+		if len(val) == 16 {
+			return "'" + fmtGUID(val) + "'"
+		}
 		return "'" + strings.ReplaceAll(string(val), "'", "''") + "'"
 	default:
 		s := fmt.Sprintf("%v", v)

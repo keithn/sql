@@ -310,14 +310,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-			case "ctrl+e":
+			case "ctrl+e", "enter":
 				m = m.acceptCompletion()
 				return m, nil
-			case "enter":
-				// Don't accept completion on Enter — dismiss popup, let
-				// Enter fall through to insert a newline. This prevents
-				// shift+ins paste newlines from accepting completions.
-				m.popup.visible = false
 			}
 			if len(msg.String()) == 1 && !isWordRune(rune(msg.String()[0])) {
 				m.popup.visible = false
@@ -482,14 +477,9 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 			}
 			return m, m.restartVimInsertCursorBlink()
-		case "ctrl+e":
+		case "ctrl+e", "enter":
 			m = m.acceptCompletionVim()
 			return m, m.restartVimInsertCursorBlink()
-		case "enter":
-			// Don't accept completion on Enter — dismiss popup and let Enter
-			// fall through to the vim state machine as a newline. Prevents
-			// shift+ins paste newlines from corrupting text via autocomplete.
-			m.popup.visible = false
 		}
 		if len(msg.String()) == 1 && !isWordRune(rune(msg.String()[0])) {
 			m.popup.visible = false
@@ -2599,7 +2589,9 @@ func (m Model) acceptCompletionVim() Model {
 	if spacePrefix != "" {
 		insert = spacePrefix + strings.TrimLeft(insert, " \t")
 	}
-	if completion.InsertText == "" && word == strings.ToLower(word) {
+	// For keywords only: if the typed word is all lowercase, insert lowercase.
+	// Schema names (tables, columns) always use their stored casing.
+	if completion.InsertText == "" && completion.Kind == CompletionKindKeyword && word == strings.ToLower(word) {
 		insert = strings.ToLower(completion.Text)
 	}
 	for _, r := range insert {
@@ -2686,7 +2678,9 @@ func (m Model) acceptCompletion() Model {
 	}
 
 	insert := completionInsertText(completion, word)
-	if completion.InsertText == "" && word == strings.ToLower(word) {
+	// For keywords only: if the typed word is all lowercase, insert lowercase.
+	// Schema names (tables, columns) always use their stored casing.
+	if completion.InsertText == "" && completion.Kind == CompletionKindKeyword && word == strings.ToLower(word) {
 		insert = strings.ToLower(completion.Text)
 	}
 	m.tabs[m.active].ta.InsertString(insert)

@@ -414,19 +414,33 @@ func computeColWidths(rs db.QueryResult) []int {
 	return widths
 }
 
+// fmtGUID formats a 16-byte slice as an uppercase GUID string.
+// MSSQL's uniqueidentifier Value() byte-swaps the first three groups to
+// big-endian before returning, so printing groups straight through produces
+// the SQL Server display format (e.g. "6F9619FF-8B86-D011-B42D-00C04FC964FF").
+// PostgreSQL uuid bytes are already big-endian, so the same format applies.
+func fmtGUID(b []byte) string {
+	return fmt.Sprintf("%X-%X-%X-%X-%X", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func formatCell(v any) string {
 	if v == nil {
 		return "∅"
 	}
 	var s string
 	if b, ok := v.([]byte); ok {
+		printable := true
 		for _, c := range b {
-			if c < 0x20 && c != '\n' && c != '\r' && c != '\t' {
-				return fmt.Sprintf("<binary %d bytes>", len(b))
+			if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') || c > 0x7E {
+				printable = false
+				break
 			}
-			if c > 0x7E {
-				return fmt.Sprintf("<binary %d bytes>", len(b))
+		}
+		if !printable {
+			if len(b) == 16 {
+				return fmtGUID(b)
 			}
+			return fmt.Sprintf("<binary %d bytes>", len(b))
 		}
 		s = string(b)
 	} else {
