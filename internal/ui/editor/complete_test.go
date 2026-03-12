@@ -34,7 +34,7 @@ func TestGetCompletionsPreservesKinds(t *testing.T) {
 func makeTestSchema() *db.Schema {
 	return &db.Schema{
 		Databases: []db.Database{{
-			Schemas: []db.SchemaEntry{{
+			Schemas: []db.SchemaNode{{
 				Name: "dbo",
 				Tables: []db.Table{
 					{

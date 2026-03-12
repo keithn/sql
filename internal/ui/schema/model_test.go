@@ -154,6 +154,10 @@ func TestBuildSelectedSQL_InnerJoinForFK(t *testing.T) {
 	if !strings.Contains(sql, "ON C.[lngAlarmTypeID] = AT.[lngAlarmTypeID]") {
 		t.Errorf("expected JOIN condition:\n%s", sql)
 	}
+	// Joined table should be projected as alias.*
+	if !strings.Contains(sql, "AT.*") {
+		t.Errorf("expected AT.* for joined table:\n%s", sql)
+	}
 }
 
 func TestBuildSelectedSQL_JoinAliasDoesNotCollideWithMain(t *testing.T) {

@@ -426,6 +426,11 @@ func (m Model) buildSelectedSQL(e tableEntry) string {
 		return m.selectSQL(e)
 	}
 
+	// Append alias.* for each joined table.
+	for _, j := range joins {
+		colParts = append(colParts, "    "+j.alias+".*")
+	}
+
 	mainTable := m.quotedTableName(e)
 	fromParts := []string{mainTable + " AS " + mainAlias}
 	for _, j := range joins {
