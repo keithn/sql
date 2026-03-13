@@ -3,9 +3,11 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -16,9 +18,11 @@ import (
 	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/export"
 	"github.com/sqltui/sql/internal/screenshot"
+	"github.com/sqltui/sql/internal/ui/cellview"
 	"github.com/sqltui/sql/internal/ui/editor"
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
+	"github.com/sqltui/sql/internal/ui/results"
 	"github.com/sqltui/sql/internal/ui/schema"
 	"github.com/sqltui/sql/internal/workspace"
 )
@@ -101,6 +105,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.schema, cmd = m.schema.Update(msg)
 			return m, cmd
+		}
+		if m.cellView.Active() {
+			var cmd tea.Cmd
+			m.cellView, cmd = m.cellView.Update(msg)
+			return m, cmd
+		}
+		// When the results filter bar is open, bypass global key shortcuts so
+		// typed characters reach the filter input unmolested.
+		if m.results.FilterOpen() {
+			return m.routeToFocused(msg)
 		}
 		return m.handleGlobalKey(msg)
 
@@ -332,6 +346,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar = m.statusbar.SetTx(m.session != nil && m.session.InTransaction())
 		m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
 		return m, nil
+
+	case results.CellYankMsg:
+		if err := writeClipboard(msg.Text); err != nil {
+			m.statusbar = m.statusbar.SetError("copy: " + err.Error())
+		} else {
+			m.statusbar = m.statusbar.SetError("copied to clipboard")
+		}
+		return m, nil
+
+	case results.FilterConfirmedMsg:
+		_ = saveFilterHistory(m.results.FilterHistory())
+		return m, nil
+
+	case cellview.CloseMsg:
+		m.cellView = m.cellView.Close()
+		return m, nil
+
+	case cellview.CopyMsg:
+		if err := writeClipboard(msg.Text); err != nil {
+			m.statusbar = m.statusbar.SetError("copy: " + err.Error())
+		} else {
+			m.statusbar = m.statusbar.SetError("copied to clipboard")
+		}
+		return m, nil
 	}
 
 	return m.routeToFocused(msg)
@@ -364,6 +402,25 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if m.focused == PaneResults {
 			return m.openExportPalette()
+		}
+
+	case "v":
+		if m.focused == PaneResults {
+			return m.openCellView()
+		}
+
+	case "f":
+		if m.focused == PaneResults {
+			m.results = m.results.OpenFilter()
+			return m, nil
+		}
+
+	case "r":
+		if m.focused == PaneResults && m.lastSQL != "" && m.session != nil {
+			m.results = m.results.SetLoading(true)
+			m.statusbar = m.statusbar.SetError("")
+			m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
+			return m, executeCmd(m.session, m.lastSQL)
 		}
 
 	// Open schema browser popup.
@@ -616,6 +673,16 @@ func (m Model) handleHistoryPaletteSelection(sqlText string) (tea.Model, tea.Cmd
 	return m, tea.Batch(focusCmd, insertCmd)
 }
 
+func (m Model) openCellView() (tea.Model, tea.Cmd) {
+	text, ok := m.results.CurrentCellRaw()
+	if !ok {
+		m.statusbar = m.statusbar.SetError("no cell selected")
+		return m, nil
+	}
+	m.cellView = m.cellView.Open(text)
+	return m, nil
+}
+
 func (m Model) openExportPalette() (tea.Model, tea.Cmd) {
 	rs := m.results.ActiveResult()
 	if rs == nil {
@@ -739,6 +806,34 @@ func writeClipboard(text string) error {
 	}
 	cmd.Stdin = bytes.NewBufferString(text)
 	return cmd.Run()
+}
+
+func loadFilterHistory() []string {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, "filter_history.json"))
+	if err != nil {
+		return nil
+	}
+	var hist []string
+	if err := json.Unmarshal(data, &hist); err != nil {
+		return nil
+	}
+	return hist
+}
+
+func saveFilterHistory(hist []string) error {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(hist)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dataDir, "filter_history.json"), data, 0644)
 }
 
 func (m Model) recordHistory(mode, sqlText string) {
@@ -975,6 +1070,7 @@ func (m Model) applySize() (tea.Model, tea.Cmd) {
 	m.results = m.results.SetSize(layout.contentW, layout.resultsH)
 	m.schema = m.schema.SetSize(m.width, m.height)
 	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 24))
+	m.cellView = m.cellView.SetSize(m.width, m.height)
 	m.palette = m.palette.SetSize(layout.contentW-6, minInt(m.height-4, 12))
 	m.modal = m.modal.SetSize(layout.contentW-4, minInt(m.height-4, 14))
 	m.statusbar = m.statusbar.SetWidth(m.width)

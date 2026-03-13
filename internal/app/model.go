@@ -7,6 +7,7 @@ import (
 	"github.com/sqltui/sql/internal/config"
 	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/ui/editor"
+	"github.com/sqltui/sql/internal/ui/cellview"
 	uihelp "github.com/sqltui/sql/internal/ui/help"
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
@@ -40,6 +41,7 @@ type Model struct {
 	schema    schema.Model
 	statusbar statusbar.Model
 	modal     modal.Model
+	cellView  cellview.Model
 
 	activeConn        string
 	session           *db.Session
@@ -72,6 +74,8 @@ func New(cfg *config.Config, connectTo string) Model {
 		modal:       modal.New(),
 		ws:          ws,
 	}
+	m.results = m.results.SetFilterHistory(loadFilterHistory())
+
 	if vimEnabled, ok, err := ws.LoadVimMode(); err == nil && ok {
 		m.editor = m.editor.SetVimEnabled(vimEnabled)
 	}

@@ -92,3 +92,4 @@ type SchemaLoadedMsg struct {
 type SchemaTableSelectedMsg struct {
 	SQL string
 }
+

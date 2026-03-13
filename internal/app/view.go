@@ -26,5 +26,9 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
 	}
 
+	if m.cellView.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.cellView.View())
+	}
+
 	return content
 }
