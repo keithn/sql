@@ -11,12 +11,13 @@ import (
 )
 
 type Item struct {
-	Key     string
-	Title   string
-	Badge   string
-	Driver  string
-	Summary string
-	Search  string
+	Key       string
+	Title     string
+	Badge     string
+	Driver    string
+	Summary   string
+	Search    string
+	Deletable bool // if true, 'd' key is enabled for this item
 }
 
 type Kind int
@@ -81,7 +82,7 @@ func (m Model) Kind() Kind { return m.kind }
 func (m Model) QuickAddEnabled() bool { return m.kind == KindConnections }
 
 func (m Model) OpenConnections(items []Item) (Model, tea.Cmd) {
-	return m.open(KindConnections, "Connections", "Filter connections", "No matching connections", "Enter connect • Ctrl+N/A add connection • Esc close", items)
+	return m.open(KindConnections, "Connections", "Filter connections", "No matching connections", "Enter connect • Ctrl+N add • Ctrl+D delete • Esc close", items)
 }
 
 func (m Model) OpenCommands(items []Item) (Model, tea.Cmd) {
@@ -101,7 +102,7 @@ func (m Model) OpenExport(items []Item, dest string) (Model, tea.Cmd) {
 }
 
 func (m Model) OpenSnippets(items []Item) (Model, tea.Cmd) {
-	return m.open(KindSnippets, "Snippets", "Filter snippets", "No snippets saved", "Enter paste • d delete • Esc close", items)
+	return m.open(KindSnippets, "Snippets", "Filter snippets", "No snippets saved", "Enter paste • Ctrl+D delete • Esc close", items)
 }
 
 func (m Model) open(kind Kind, title, placeholder, empty, footer string, items []Item) (Model, tea.Cmd) {
@@ -171,22 +172,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			item := m.filtered[m.cursor]
 			return m.Close(), func() tea.Msg { return AcceptedMsg{Key: item.Key, Kind: m.kind} }
-		case "d":
-			if m.kind == KindSnippets && len(m.filtered) > 0 {
+		case "ctrl+d":
+			if len(m.filtered) > 0 {
 				item := m.filtered[m.cursor]
-				// Remove from items and re-filter without closing.
-				newItems := make([]Item, 0, len(m.items)-1)
-				for _, it := range m.items {
-					if it.Key != item.Key {
-						newItems = append(newItems, it)
+				if m.kind == KindSnippets || (m.kind == KindConnections && item.Deletable) {
+					if m.kind == KindSnippets {
+						// Remove from list immediately for snippets.
+						newItems := make([]Item, 0, len(m.items)-1)
+						for _, it := range m.items {
+							if it.Key != item.Key {
+								newItems = append(newItems, it)
+							}
+						}
+						m.items = newItems
+						m.syncFiltered()
+						if m.cursor >= len(m.filtered) && m.cursor > 0 {
+							m.cursor--
+						}
 					}
+					return m, func() tea.Msg { return DeleteMsg{Key: item.Key} }
 				}
-				m.items = newItems
-				m.syncFiltered()
-				if m.cursor >= len(m.filtered) && m.cursor > 0 {
-					m.cursor--
-				}
-				return m, func() tea.Msg { return DeleteMsg{Key: item.Key} }
 			}
 		}
 	}

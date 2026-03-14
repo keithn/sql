@@ -8,6 +8,7 @@ import (
 	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/mcp"
 	"github.com/sqltui/sql/internal/ui/editor"
+	"github.com/sqltui/sql/internal/ui/celledit"
 	"github.com/sqltui/sql/internal/ui/cellview"
 	uihelp "github.com/sqltui/sql/internal/ui/help"
 	"github.com/sqltui/sql/internal/ui/modal"
@@ -15,6 +16,7 @@ import (
 	"github.com/sqltui/sql/internal/ui/results"
 	"github.com/sqltui/sql/internal/ui/schema"
 	"github.com/sqltui/sql/internal/ui/statusbar"
+	"github.com/sqltui/sql/internal/ui/updatepreview"
 	"github.com/sqltui/sql/internal/workspace"
 )
 
@@ -42,7 +44,10 @@ type Model struct {
 	schema    schema.Model
 	statusbar statusbar.Model
 	modal     modal.Model
-	cellView  cellview.Model
+	cellView        cellview.Model
+	cellEdit        celledit.Model
+	cellEditCtx     results.CellContext // context captured when cell edit was opened
+	updatePreview   updatepreview.Model
 
 	activeConn        string
 	session           *db.Session
@@ -57,10 +62,6 @@ type Model struct {
 	snippetSaveOpen  bool   // true when the "save snippet name" prompt is visible
 	snippetSaveInput []rune // current input for snippet name
 	snippetSaveSQL   string // SQL body being saved
-
-	cellEditOpen   bool   // true when the inline cell value editor is active
-	cellEditInput  []rune // current input buffer
-	cellEditCursor int    // cursor position in cellEditInput
 
 	mcpQueryReply chan<- mcp.Reply // pending MCP execute_query reply channel; nil if none
 	pollSecs             int    // active poll interval in seconds (0 = off)
@@ -88,6 +89,8 @@ func New(cfg *config.Config, connectTo string) Model {
 		schema:      schema.New().SetResultLimit(cfg.Editor.ResultLimit),
 		statusbar:   statusbar.New(),
 		modal:       modal.New(),
+		cellEdit:      celledit.New(),
+		updatePreview: updatepreview.New(),
 		ws:          ws,
 	}
 	m.results = m.results.SetFilterHistory(loadFilterHistory())

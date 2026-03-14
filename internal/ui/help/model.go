@@ -8,29 +8,39 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Section is a titled group of lines within a tab.
 type Section struct {
 	Title string
 	Lines []string
 }
 
+// Tab is a named page of sections shown in the help overlay.
+type Tab struct {
+	Title    string
+	Sections []Section
+}
+
 type Model struct {
-	active bool
-	title  string
-	width  int
-	height int
-	lines  []string
-	scroll int
+	active    bool
+	width     int
+	height    int
+	tabs      []Tab
+	activeTab int
+	lines     [][]string // rendered lines per tab
+	scroll    int
 }
 
 var (
-	panelStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#4ec9b0"))
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9cdcfe"))
-	helpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	panelStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	titleStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#4ec9b0"))
+	sectionStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9cdcfe"))
+	helpStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	tabActiveStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#005f87")).Padding(0, 1)
+	tabInactiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Padding(0, 1)
 )
 
 func New() Model {
-	return Model{title: "Help & Settings"}
+	return Model{}
 }
 
 func (m Model) Active() bool { return m.active }
@@ -53,10 +63,19 @@ func (m Model) SetSize(w, h int) Model {
 	return m
 }
 
-func (m Model) Open(sections []Section) Model {
+// Open activates the overlay with the given tabs, starting on initialTab.
+func (m Model) Open(tabs []Tab, initialTab int) Model {
 	m.active = true
 	m.scroll = 0
-	m.lines = renderSections(sections)
+	m.tabs = tabs
+	if initialTab < 0 || initialTab >= len(tabs) {
+		initialTab = 0
+	}
+	m.activeTab = initialTab
+	m.lines = make([][]string, len(tabs))
+	for i, t := range tabs {
+		m.lines[i] = renderSections(t.Sections)
+	}
 	return m
 }
 
@@ -74,6 +93,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		switch key.String() {
 		case "esc", "f1":
 			return m.Close(), nil
+		case "left", "h":
+			if m.activeTab > 0 {
+				m.activeTab--
+				m.scroll = 0
+			}
+		case "right", "l":
+			if m.activeTab < len(m.tabs)-1 {
+				m.activeTab++
+				m.scroll = 0
+			}
 		case "up", "k":
 			if m.scroll > 0 {
 				m.scroll--
@@ -96,6 +125,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.scroll = 0
 		case "end", "G":
 			m.scroll = m.maxScroll()
+		default:
+			// Number keys 1-9 jump to that tab.
+			if len(key.String()) == 1 {
+				ch := key.String()[0]
+				if ch >= '1' && ch <= '9' {
+					idx := int(ch-'1')
+					if idx < len(m.tabs) {
+						m.activeTab = idx
+						m.scroll = 0
+					}
+				}
+			}
 		}
 	}
 	return m, nil
@@ -105,29 +146,53 @@ func (m Model) View() string {
 	if !m.active {
 		return ""
 	}
+	tabBar := m.renderTabBar()
 	body := m.visibleLines()
 	lines := []string{
-		titleStyle.Render(m.title),
-		helpStyle.Render("Up/Down PgUp/PgDn Home/End • Esc/F1 close"),
-		"",
+		tabBar,
+		helpStyle.Render(strings.Repeat("─", m.width-2)),
 		strings.Join(body, "\n"),
 		"",
-		helpStyle.Render(m.positionHint()),
+		helpStyle.Render("←/→ tabs • ↑↓ scroll • PgUp/PgDn • Esc close   " + m.positionHint()),
 	}
 	return panelStyle.Width(m.width).Height(m.height).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) renderTabBar() string {
+	parts := make([]string, len(m.tabs))
+	for i, t := range m.tabs {
+		label := t.Title
+		if i < 9 {
+			label = strconv.Itoa(i+1) + ":" + label
+		}
+		if i == m.activeTab {
+			parts[i] = tabActiveStyle.Render(label)
+		} else {
+			parts[i] = tabInactiveStyle.Render(label)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func (m Model) currentLines() []string {
+	if m.activeTab < 0 || m.activeTab >= len(m.lines) {
+		return nil
+	}
+	return m.lines[m.activeTab]
+}
+
 func (m Model) visibleLines() []string {
+	all := m.currentLines()
 	bodyH := m.bodyHeight()
 	start := m.scroll
-	if start > len(m.lines) {
-		start = len(m.lines)
+	if start > len(all) {
+		start = len(all)
 	}
 	end := start + bodyH
-	if end > len(m.lines) {
-		end = len(m.lines)
+	if end > len(all) {
+		end = len(all)
 	}
-	out := append([]string(nil), m.lines[start:end]...)
+	out := append([]string(nil), all[start:end]...)
 	for len(out) < bodyH {
 		out = append(out, "")
 	}
@@ -135,6 +200,7 @@ func (m Model) visibleLines() []string {
 }
 
 func (m Model) bodyHeight() int {
+	// panel height minus: tab bar(1) + divider(1) + footer(1) + blank(1) + border(2) + padding(0) = 6
 	n := m.height - 6
 	if n < 1 {
 		return 1
@@ -143,7 +209,8 @@ func (m Model) bodyHeight() int {
 }
 
 func (m Model) maxScroll() int {
-	max := len(m.lines) - m.bodyHeight()
+	all := m.currentLines()
+	max := len(all) - m.bodyHeight()
 	if max < 0 {
 		return 0
 	}
@@ -151,15 +218,16 @@ func (m Model) maxScroll() int {
 }
 
 func (m Model) positionHint() string {
-	if len(m.lines) == 0 {
+	all := m.currentLines()
+	if len(all) == 0 {
 		return "0 lines"
 	}
 	start := m.scroll + 1
 	end := m.scroll + m.bodyHeight()
-	if end > len(m.lines) {
-		end = len(m.lines)
+	if end > len(all) {
+		end = len(all)
 	}
-	return strings.TrimSpace(strings.Join([]string{"lines", itoa(start) + "-" + itoa(end), "of", itoa(len(m.lines))}, " "))
+	return "lines " + itoa(start) + "-" + itoa(end) + " of " + itoa(len(all))
 }
 
 func renderSections(sections []Section) []string {

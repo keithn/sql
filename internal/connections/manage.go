@@ -3,7 +3,20 @@ package connections
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sqltui/sql/internal/config"
 )
+
+// DeleteManaged removes a named connection from the store and its keychain password.
+func DeleteManaged(name string, cfg *config.Config) error {
+	_ = cfg // reserved for future use
+	store, err := LoadManagedStore()
+	if err != nil {
+		return err
+	}
+	_ = DeletePassword(name) // ignore keychain errors (password may not exist)
+	return store.Remove(name)
+}
 
 func SaveManaged(name, connString string) (string, error) {
 	name = strings.TrimSpace(name)

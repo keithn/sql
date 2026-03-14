@@ -839,23 +839,23 @@ func TestF1OpensAndClosesHelpScreen(t *testing.T) {
 		t.Fatalf("help should be active after F1")
 	}
 	view := m.View()
-	if !strings.Contains(view, "Help & Settings") || !strings.Contains(view, "Ctrl+K") {
-		t.Fatalf("help view should contain title, bindings, and current settings; got %q", view)
+	if !strings.Contains(view, "Editor") || !strings.Contains(view, "Ctrl+E") {
+		t.Fatalf("help view should contain tab bar and editor bindings; got %q", view)
 	}
-	if !helpSectionsContain(m.helpSections(), "Ctrl+\\") {
-		t.Fatalf("help sections should include the updated comment shortcut")
+	if !helpTabsContain(m.helpTabs(), "Ctrl+\\") {
+		t.Fatalf("help tabs should include the updated comment shortcut")
 	}
-	if !helpSectionsContain(m.helpSections(), "Ctrl+Shift+F / Ctrl+F") {
-		t.Fatalf("help sections should include the active-block format shortcut")
+	if !helpTabsContain(m.helpTabs(), "Ctrl+Shift+F / Ctrl+F") {
+		t.Fatalf("help tabs should include the active-block format shortcut")
 	}
-	if !helpSectionsContain(m.helpSections(), "Ctrl+R") {
-		t.Fatalf("help sections should include the refactor popup shortcut")
+	if !helpTabsContain(m.helpTabs(), "Ctrl+R") {
+		t.Fatalf("help tabs should include the refactor popup shortcut")
 	}
-	if !helpSectionsContain(m.helpSections(), "Alt+Up / Alt+Down") {
-		t.Fatalf("help sections should include the query-block navigation shortcut")
+	if !helpTabsContain(m.helpTabs(), "Alt+Up / Alt+Down") {
+		t.Fatalf("help tabs should include the query-block navigation shortcut")
 	}
-	if !helpSectionsContain(m.helpSections(), "tab_size=4") {
-		t.Fatalf("help sections should include current editor settings")
+	if !helpTabsContain(m.helpTabs(), "tab_size=4") {
+		t.Fatalf("help tabs should include current editor settings")
 	}
 	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyF1})
 	m = nm.(Model)
@@ -1037,11 +1037,13 @@ func TestSchemaCompletionsIncludeKinds(t *testing.T) {
 	}
 }
 
-func helpSectionsContain(sections []uihelp.Section, needle string) bool {
-	for _, section := range sections {
-		for _, line := range section.Lines {
-			if strings.Contains(line, needle) {
-				return true
+func helpTabsContain(tabs []uihelp.Tab, needle string) bool {
+	for _, tab := range tabs {
+		for _, section := range tab.Sections {
+			for _, line := range section.Lines {
+				if strings.Contains(line, needle) {
+					return true
+				}
 			}
 		}
 	}

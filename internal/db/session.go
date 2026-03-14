@@ -118,6 +118,34 @@ func (s *Session) Execute(ctx context.Context, query string) ([]QueryResult, err
 	return results, rows.Err()
 }
 
+// Exec runs a DML statement and returns rows affected. Use this instead of
+// Execute when you need RowsAffected (UPDATE / DELETE / INSERT).
+func (s *Session) Exec(ctx context.Context, query string) (int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancelFn = cancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.cancelFn = nil
+		s.mu.Unlock()
+		cancel()
+	}()
+
+	var result sql.Result
+	var err error
+	if s.inTx && s.tx != nil {
+		result, err = s.tx.ExecContext(ctx, query)
+	} else {
+		result, err = s.DB.ExecContext(ctx, query)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
+}
+
 // Explain returns estimated/non-executing plan output for each explainable SQL unit.
 func (s *Session) Explain(ctx context.Context, query string) ([]QueryResult, error) {
 	ctx, cancel := context.WithCancel(ctx)

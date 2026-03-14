@@ -10,7 +10,7 @@ func TestAddConnectionModalSubmitSaveOnly(t *testing.T) {
 	m, _ := New().SetSize(80, 14).OpenAddConnection()
 	m.nameInput.SetValue("prod")
 	m.connInput.SetValue("postgres://app:secret@localhost/mydb")
-	m.focus = 2
+	m.focus = 3 // actions row (string mode: 0=name 1=mode 2=conn 3=actions)
 	m.action = AddConnSaveOnly
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -27,7 +27,7 @@ func TestAddConnectionModalSubmitSaveOnly(t *testing.T) {
 func TestAddConnectionModalRequiresNameWhenSaving(t *testing.T) {
 	m, _ := New().SetSize(80, 14).OpenAddConnection()
 	m.connInput.SetValue("postgres://app@localhost/mydb")
-	m.focus = 2
+	m.focus = 3 // actions row
 	m.action = AddConnSaveOnly
 
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

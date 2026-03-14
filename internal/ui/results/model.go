@@ -897,6 +897,9 @@ func rowsEqual(a, b []any) bool {
 	return true
 }
 
+// EditCellMsg is sent when the user presses e in the row detail view.
+type EditCellMsg struct{ Ctx CellContext }
+
 // updateRowDetail handles keys while the row detail view is open.
 func (m Model) updateRowDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 	rs := m.activeResult()
@@ -931,8 +934,33 @@ func (m Model) updateRowDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
 			text := formatCellRaw(row[m.rowDetailCursor])
 			return m, func() tea.Msg { return CellYankMsg{Text: text} }
 		}
+	case "e":
+		if ctx, ok := m.RowDetailCellContext(); ok {
+			return m, func() tea.Msg { return EditCellMsg{Ctx: ctx} }
+		}
 	}
 	return m, nil
+}
+
+// RowDetailCellContext returns context for the focused field in the row detail view.
+func (m Model) RowDetailCellContext() (CellContext, bool) {
+	rs := m.activeResult()
+	rows := m.activeRows()
+	if rs == nil || m.cursorRow >= len(rows) || m.rowDetailCursor >= len(rs.Columns) {
+		return CellContext{}, false
+	}
+	row := rows[m.cursorRow]
+	val := ""
+	if m.rowDetailCursor < len(row) && row[m.rowDetailCursor] != nil {
+		val = formatCellRaw(row[m.rowDetailCursor])
+	}
+	return CellContext{
+		ColName:  rs.Columns[m.rowDetailCursor].Name,
+		ColIndex: m.rowDetailCursor,
+		Value:    val,
+		Columns:  rs.Columns,
+		Row:      row,
+	}, true
 }
 
 // renderRowDetail renders a full-height vertical detail view for the cursor row.
@@ -1028,7 +1056,7 @@ func (m Model) renderRowDetail(w, h int) string {
 	// Footer hint
 	sb.WriteString(rdDivStyle.Render(strings.Repeat("─", w)) + "\n")
 	sb.WriteString(rdHintStyle.Render(
-		fmt.Sprintf("j/k: field  h/l: row  y: copy  Esc: close  field %d/%d",
+		fmt.Sprintf("j/k: field  h/l: row  y: copy  e: edit  Esc: close  field %d/%d",
 			m.rowDetailCursor+1, len(rs.Columns))))
 
 	return sb.String()
@@ -2042,6 +2070,9 @@ func formatCellRaw(v any) string {
 	if v == nil {
 		return ""
 	}
+	if t, ok := v.(time.Time); ok {
+		return FormatTimeSQL(t)
+	}
 	if b, ok := v.([]byte); ok {
 		printable := true
 		for _, c := range b {
@@ -2059,6 +2090,19 @@ func formatCellRaw(v any) string {
 		return string(b)
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// FormatTimeSQL formats a time.Time as a SQL-friendly string.
+// Dates at midnight are formatted as date-only; otherwise datetime with optional sub-seconds.
+func FormatTimeSQL(t time.Time) string {
+	t = t.UTC()
+	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+		return t.Format("2006-01-02")
+	}
+	if t.Nanosecond() == 0 {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return t.Format("2006-01-02 15:04:05.000")
 }
 
 func formatCell(v any) string {

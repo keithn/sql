@@ -131,11 +131,29 @@ func SQLInsert(rs db.QueryResult, tableName string) string {
 	return sb.String()
 }
 
-// ExtractTableName attempts to infer the primary table name from a SQL statement
-// by locating the first identifier after a FROM keyword. Returns "table_name" if
-// no table can be reliably extracted.
+// ExtractTableName attempts to infer the primary table name from a SQL statement.
+// It handles SELECT … FROM <table>, UPDATE <table> SET …, INSERT INTO <table>,
+// and DELETE FROM <table>. Returns "table_name" if no table can be reliably extracted.
 func ExtractTableName(sql string) string {
-	upper := strings.ToUpper(sql)
+	// Normalize all whitespace to single spaces so newlines between tokens don't break matching.
+	normalized := strings.Join(strings.Fields(sql), " ")
+	upper := strings.ToUpper(normalized)
+
+	// UPDATE <table> SET — most common case for generated UPDATEs.
+	if strings.HasPrefix(upper, "UPDATE ") {
+		if name := extractIdentAfterKeyword(normalized[7:], "SET"); name != "" {
+			return name
+		}
+	}
+
+	// INSERT INTO <table>
+	if strings.HasPrefix(upper, "INSERT INTO ") {
+		if name := extractFirstIdent(strings.TrimSpace(normalized[12:])); name != "" {
+			return name
+		}
+	}
+
+	// SELECT / DELETE: find first top-level FROM.
 	depth := 0
 	for i := 0; i < len(upper)-5; i++ {
 		switch upper[i] {
@@ -147,53 +165,75 @@ func ExtractTableName(sql string) string {
 			}
 		}
 		if depth == 0 && upper[i:i+5] == " FROM" {
-			rest := strings.TrimSpace(sql[i+5:])
-			if rest == "" {
-				return "table_name"
-			}
-			// Bracket-quoted identifier: [name with spaces]
-			if rest[0] == '[' {
-				end := strings.Index(rest, "]")
-				if end < 0 {
-					return "table_name"
-				}
-				name := rest[1:end]
-				if name == "" {
-					return "table_name"
-				}
+			if name := extractFirstIdent(strings.TrimSpace(normalized[i+5:])); name != "" {
 				return name
 			}
-			// Backtick-quoted identifier
-			if rest[0] == '`' {
-				end := strings.Index(rest[1:], "`")
-				if end < 0 {
-					return "table_name"
-				}
-				name := rest[1 : end+1]
-				if name == "" {
-					return "table_name"
-				}
-				return name
-			}
-			// Subquery
-			if rest[0] == '(' {
-				return "table_name"
-			}
-			// Unquoted identifier — take until whitespace or punctuation (keep dots for schema.table)
-			end := strings.IndexAny(rest, " \t\n\r,([")
-			var name string
-			if end < 0 {
-				name = rest
-			} else {
-				name = rest[:end]
-			}
-			if name == "" {
-				return "table_name"
-			}
-			return name
 		}
 	}
 	return "table_name"
+}
+
+// extractIdentAfterKeyword extracts the identifier from s that appears before
+// the given keyword (e.g. extracts table from "dbo.tbl SET col=1").
+func extractIdentAfterKeyword(s, keyword string) string {
+	// Normalize whitespace so newlines between tokens don't break matching.
+	s = strings.Join(strings.Fields(s), " ")
+	upper := strings.ToUpper(s)
+	idx := -1
+	// Find the keyword at a word boundary.
+	search := " " + keyword
+	i := strings.Index(upper, search)
+	if i >= 0 {
+		idx = i
+	} else if strings.HasPrefix(upper, keyword+" ") || upper == keyword {
+		return "" // keyword is first token, no table before it
+	}
+	var portion string
+	if idx >= 0 {
+		portion = strings.TrimSpace(s[:idx])
+	} else {
+		portion = strings.TrimSpace(s)
+	}
+	return extractFirstIdent(portion)
+}
+
+// extractFirstIdent returns the first SQL identifier (possibly schema-qualified)
+// from s, handling bracket-quoted, backtick-quoted, and bare identifiers.
+func extractFirstIdent(s string) string {
+	if s == "" {
+		return ""
+	}
+	switch s[0] {
+	case '[':
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return ""
+		}
+		inner := s[1:end]
+		rest := s[end+1:]
+		// May be schema-qualified: [schema].[table]
+		if strings.HasPrefix(rest, ".[") {
+			end2 := strings.Index(rest[2:], "]")
+			if end2 >= 0 {
+				return inner + "." + rest[2:end2+2]
+			}
+		}
+		return inner
+	case '`':
+		end := strings.Index(s[1:], "`")
+		if end < 0 {
+			return ""
+		}
+		return s[1 : end+1]
+	case '(':
+		return "" // subquery
+	default:
+		end := strings.IndexAny(s, " \t\n\r,([")
+		if end < 0 {
+			return s
+		}
+		return s[:end]
+	}
 }
 
 func csvQuote(s string) string {

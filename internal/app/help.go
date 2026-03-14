@@ -10,7 +10,14 @@ import (
 	uihelp "github.com/sqltui/sql/internal/ui/help"
 )
 
-func (m Model) helpSections() []uihelp.Section {
+const (
+	HelpTabEditor  = 0
+	HelpTabResults = 1
+	HelpTabGeneral = 2
+	HelpTabSettings = 3
+)
+
+func (m Model) helpTabs() []uihelp.Tab {
 	configDir, _ := config.ConfigDir()
 	dataDir, _ := config.DataDir()
 	named, _ := connections.List(m.cfg)
@@ -23,98 +30,171 @@ func (m Model) helpSections() []uihelp.Section {
 		activeConn = "_adhoc"
 	}
 
-	sections := []uihelp.Section{{
-		Title: "Runtime state",
-		Lines: []string{
-			"• Focused pane: " + m.paneLabel(),
-			"• Active connection: " + activeConn,
-			"• Schema browser: popup (Ctrl+B to open)",
-			"• Vim mode: " + vimMode,
-			"• Config file: " + filepath.Join(configDir, "config.lua"),
-			"• Data dir: " + dataDir,
-			"• Named connections available: " + fmt.Sprintf("%d", len(named)),
-			"• Startup queries loaded: " + fmt.Sprintf("%d", len(m.cfg.Startup)),
-		mcpLine(m.mcpMode, m.mcpAddr),
-		},
-	}, {
-		Title: "Runtime keybindings",
-		Lines: []string{
-			"• F1 — help & settings",
-			"• Ctrl+P — command palette (explain, transactions, snippets...)",
-			"• Ctrl+H — query history palette",
-			"• Ctrl+K — connection switcher",
-			"• Ctrl+N outside editor — add connection",
-			"• Ctrl+B / F2 — open schema browser popup",
-			"• F3 / Alt+1 — focus editor (also exits results fullscreen)",
-			"• F4 / Alt+2 — focus results",
-			"• Ctrl+L — toggle results fullscreen (hides editor)",
-			"• Ctrl+Alt+V / Alt+V — toggle vim mode",
-			"• Ctrl+Q — quit and save session",
-			"• Ctrl+E — execute block under cursor",
-			"• Ctrl+R — refactor popup (expand *, SELECT↔UPDATE, IDENTITY_INSERT, rename tab)",
-			"• Alt+Up / Alt+Down — previous/next query block",
-			"• Ctrl+Shift+F / Ctrl+F — format active block",
-			"• Ctrl+\\ — toggle comment on current line",
-			"• Ctrl+G / : (vim) — goto line",
-			"• F5 — confirm then execute full buffer",
-			"• Ctrl+V / Shift+Ins — paste from clipboard",
-			"• Ctrl+N — new tab (inside editor)",
-			"• Ctrl+W — close tab",
-			"• Ctrl+PgDn / Alt+L — next tab",
-			"• Ctrl+PgUp / Alt+H — previous tab",
-			"• Results: arrows / hjkl, PgUp/PgDn, Home/End, Alt+PgUp/PgDn",
-			"• Results: f — filter column (regex)  F — clear all filters",
-			"• Results: s — cycle column sort (asc/desc/off)  p — pin/diff baseline  P — poll interval",
-			"• Results: # — toggle row numbers",
-			"• Results: L — change result limit",
-			"• Results: Enter — row detail view (j/k fields, h/l rows, y copy, Esc close)",
-			"• Results: X — open cell value viewer",
-			"• Results: y — yank cell value to clipboard",
-			"• Results: e — edit cell (generates UPDATE, pastes into editor)",
-			"• Results: E — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
-			"• Schema: Enter/↓ — go to list, type to filter, / — back to search",
-			"• Schema: ↑↓/jk navigate  Tab — column select  a — actions  r — row count  Esc — back/close",
-			"• Command palette: type to filter, ↑↓ select, Enter run, Esc close",
-			"• History palette: type to filter recent SQL, Enter paste, Esc close",
-			"• Switcher: type to filter, ↑↓ select, Enter connect, Ctrl+N add, Esc close",
-			"• Confirm dialogs: ←→ / Tab choose action, Enter confirm, Esc cancel",
-			"• Help screen: ↑↓ PgUp/PgDn Home/End, Esc/F1 close",
-		},
-	}, {
-		Title: "Loaded editor settings",
-		Lines: []string{
-			fmt.Sprintf("• tab_size=%d", m.cfg.Editor.TabSize),
-			fmt.Sprintf("• use_spaces=%t", m.cfg.Editor.UseSpaces),
-			fmt.Sprintf("• vim_mode_default=%t", m.cfg.Editor.VimMode),
-			fmt.Sprintf("• wrap=%t", m.cfg.Editor.Wrap),
-			fmt.Sprintf("• row_limit=%d", m.cfg.Editor.RowLimit),
-			fmt.Sprintf("• theme=%s", m.cfg.Editor.Theme),
-			fmt.Sprintf("• chroma_theme=%s", m.cfg.Editor.ChromaTheme),
-			fmt.Sprintf("• font_width=%d", m.cfg.Editor.FontWidth),
-			fmt.Sprintf("• undo_limit=%d", m.cfg.Editor.UndoLimit),
-			fmt.Sprintf("• format_line_length=%d", m.cfg.Editor.FormatLineLength),
-		},
-	}, {
-		Title: "Loaded key settings",
-		Lines: []string{
-			"• Note: key settings are loaded from config; some commands still use built-in bindings while key override wiring is incomplete.",
-			fmt.Sprintf("• execute=%s", m.cfg.Keys.Execute),
-			fmt.Sprintf("• execute_block=%s", m.cfg.Keys.ExecuteBlock),
-			fmt.Sprintf("• execute_all=%s", m.cfg.Keys.ExecuteAll),
-			fmt.Sprintf("• format_query=%s", m.cfg.Keys.FormatQuery),
-			fmt.Sprintf("• expand_star=%s", m.cfg.Keys.ExpandStar),
-			fmt.Sprintf("• toggle_comment=%s", m.cfg.Keys.ToggleComment),
-			fmt.Sprintf("• toggle_schema=%s", m.cfg.Keys.ToggleSchema),
-			fmt.Sprintf("• connection_picker=%s", m.cfg.Keys.ConnectionPicker),
-			fmt.Sprintf("• history=%s", m.cfg.Keys.History),
-			fmt.Sprintf("• command_palette=%s", m.cfg.Keys.CommandPalette),
-		},
-	}, {
-		Title: "Loaded theme / startup settings",
-		Lines: themeAndStartupLines(m),
-	}}
+	editorTab := uihelp.Tab{
+		Title: "Editor",
+		Sections: []uihelp.Section{{
+			Title: "Editing",
+			Lines: []string{
+				"• Ctrl+E — execute block under cursor",
+				"• F5 — confirm then execute full buffer",
+				"• Ctrl+Shift+F / Ctrl+F — format active block",
+				"• Ctrl+\\ — toggle comment on current line",
+				"• Ctrl+R — refactor popup (expand *, SELECT↔UPDATE, IDENTITY_INSERT, rename tab)",
+				"• Alt+Up / Alt+Down — jump to previous / next query block",
+				"• Ctrl+G / : (vim) — goto line",
+				"• Ctrl+V / Shift+Ins — paste from clipboard",
+			},
+		}, {
+			Title: "Tabs",
+			Lines: []string{
+				"• Ctrl+N — new tab",
+				"• Ctrl+W — close tab",
+				"• Ctrl+PgDn / Alt+L — next tab",
+				"• Ctrl+PgUp / Alt+H — previous tab",
+			},
+		}, {
+			Title: "Vim mode",
+			Lines: []string{
+				"• Ctrl+Alt+V / Alt+V — toggle vim mode (current: " + vimMode + ")",
+				"• i/I/a/A/o/O — enter INSERT",
+				"• hjkl, w/b/e, 0/^/$, gg/G, {/}, Ctrl-u/d — movement",
+				"• count prefix: 3j, 5w, etc.",
+				"• x/X — delete char; dd/cc/yy; d/c/y + motion",
+				"• p/P — paste; u / Ctrl+R — undo/redo",
+				"• v — charwise visual; V — linewise visual; y/d/>/< on selection",
+			},
+		}, {
+			Title: "Editor settings",
+			Lines: []string{
+				fmt.Sprintf("• tab_size=%d", m.cfg.Editor.TabSize),
+				fmt.Sprintf("• use_spaces=%t", m.cfg.Editor.UseSpaces),
+				fmt.Sprintf("• vim_mode_default=%t", m.cfg.Editor.VimMode),
+				fmt.Sprintf("• wrap=%t", m.cfg.Editor.Wrap),
+				fmt.Sprintf("• row_limit=%d", m.cfg.Editor.RowLimit),
+				fmt.Sprintf("• theme=%s", m.cfg.Editor.Theme),
+				fmt.Sprintf("• chroma_theme=%s", m.cfg.Editor.ChromaTheme),
+				fmt.Sprintf("• font_width=%d", m.cfg.Editor.FontWidth),
+				fmt.Sprintf("• undo_limit=%d", m.cfg.Editor.UndoLimit),
+				fmt.Sprintf("• format_line_length=%d", m.cfg.Editor.FormatLineLength),
+			},
+		}},
+	}
 
-	return sections
+	resultsTab := uihelp.Tab{
+		Title: "Results",
+		Sections: []uihelp.Section{{
+			Title: "Navigation",
+			Lines: []string{
+				"• Arrows / hjkl — move cell",
+				"• PgUp / PgDn — page up/down",
+				"• Home / End — first / last column",
+				"• Alt+PgUp / Alt+PgDn — first / last row",
+			},
+		}, {
+			Title: "Viewing",
+			Lines: []string{
+				"• Enter — row detail view (j/k fields, h/l rows, y copy, Esc close)",
+				"• X — open cell value viewer",
+				"• y — yank cell value to clipboard",
+				"• # — toggle row numbers",
+				"• Ctrl+L — toggle results fullscreen (hides editor)",
+			},
+		}, {
+			Title: "Filtering & sorting",
+			Lines: []string{
+				"• f — filter column (regex)",
+				"• F — clear all filters",
+				"• s — cycle column sort (asc / desc / off)",
+				"• L — change result limit",
+			},
+		}, {
+			Title: "Actions",
+			Lines: []string{
+				"• e — edit cell (generates UPDATE, pastes into editor)",
+				"• E — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
+				"• p — pin / diff baseline",
+				"• P — set poll interval (auto-refresh)",
+				"• Ctrl+E / Ctrl+R — re-run last query",
+			},
+		}},
+	}
+
+	generalTab := uihelp.Tab{
+		Title: "General",
+		Sections: []uihelp.Section{{
+			Title: "Global navigation",
+			Lines: []string{
+				"• F1 — this help screen",
+				"• F3 / Alt+1 — focus editor",
+				"• F4 / Alt+2 — focus results",
+				"• Ctrl+B / F2 — toggle schema browser",
+				"• Ctrl+P — command palette (explain, transactions, snippets…)",
+				"• Ctrl+H — query history palette",
+				"• Ctrl+K — connection switcher",
+				"• Ctrl+N outside editor — add connection",
+				"• Ctrl+Q — quit and save session",
+			},
+		}, {
+			Title: "Schema browser",
+			Lines: []string{
+				"• Enter / ↓ — go to list; type to filter; / — back to search",
+				"• ↑↓ / jk — navigate list",
+				"• Tab — column select",
+				"• a — actions menu; r — row count",
+				"• Esc — back / close",
+			},
+		}, {
+			Title: "Overlays & dialogs",
+			Lines: []string{
+				"• Command palette: type to filter, ↑↓ select, Enter run, Esc close",
+				"• History palette: type to filter recent SQL, Enter paste, Esc close",
+				"• Connection switcher: ↑↓ select, Enter connect, Ctrl+N add, Esc close",
+				"• Confirm dialogs: ←→ / Tab choose, Enter confirm, Esc cancel",
+				"• Help screen: ←→ switch tabs, ↑↓ scroll, Esc / F1 close",
+			},
+		}, {
+			Title: "Runtime state",
+			Lines: []string{
+				"• Focused pane: " + m.paneLabel(),
+				"• Active connection: " + activeConn,
+				"• Vim mode: " + vimMode,
+				"• Named connections available: " + fmt.Sprintf("%d", len(named)),
+				"• Startup queries loaded: " + fmt.Sprintf("%d", len(m.cfg.Startup)),
+				mcpLine(m.mcpMode, m.mcpAddr),
+			},
+		}},
+	}
+
+	settingsTab := uihelp.Tab{
+		Title: "Settings",
+		Sections: []uihelp.Section{{
+			Title: "Paths",
+			Lines: []string{
+				"• Config file: " + filepath.Join(configDir, "config.lua"),
+				"• Data dir:    " + dataDir,
+			},
+		}, {
+			Title: "Key bindings (from config)",
+			Lines: []string{
+				"• Note: key settings are loaded from config; some commands still use built-in bindings.",
+				fmt.Sprintf("• execute=%s", m.cfg.Keys.Execute),
+				fmt.Sprintf("• execute_block=%s", m.cfg.Keys.ExecuteBlock),
+				fmt.Sprintf("• execute_all=%s", m.cfg.Keys.ExecuteAll),
+				fmt.Sprintf("• format_query=%s", m.cfg.Keys.FormatQuery),
+				fmt.Sprintf("• expand_star=%s", m.cfg.Keys.ExpandStar),
+				fmt.Sprintf("• toggle_comment=%s", m.cfg.Keys.ToggleComment),
+				fmt.Sprintf("• toggle_schema=%s", m.cfg.Keys.ToggleSchema),
+				fmt.Sprintf("• connection_picker=%s", m.cfg.Keys.ConnectionPicker),
+				fmt.Sprintf("• history=%s", m.cfg.Keys.History),
+				fmt.Sprintf("• command_palette=%s", m.cfg.Keys.CommandPalette),
+			},
+		}, {
+			Title: "Theme",
+			Lines: themeAndStartupLines(m),
+		}},
+	}
+
+	return []uihelp.Tab{editorTab, resultsTab, generalTab, settingsTab}
 }
 
 func themeAndStartupLines(m Model) []string {

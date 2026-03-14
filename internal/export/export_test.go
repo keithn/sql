@@ -116,7 +116,9 @@ func TestExtractTableName(t *testing.T) {
 		{"SELECT a FROM (SELECT 1 AS a) sub", "table_name"}, // subquery → fallback
 		{"SELECT * FROM users u JOIN roles r ON u.id = r.user_id", "users"},
 		{"WITH cte AS (SELECT 1) SELECT * FROM cte", "cte"},
-		{"UPDATE users SET x = 1", "table_name"}, // no FROM
+		{"UPDATE users SET x = 1", "users"},
+		{"UPDATE table_name\nSET [col] = 3\nWHERE [id] = 1", "table_name"},
+		{"UPDATE [dbo].[Orders]\nSET x = 1\nWHERE id = 1", "dbo.Orders"},
 		{"", "table_name"},
 	}
 	for _, c := range cases {

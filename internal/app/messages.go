@@ -115,4 +115,16 @@ type SchemaTableSelectedMsg struct {
 // PollTickMsg is fired by the poller timer to trigger a re-execution.
 type PollTickMsg struct{}
 
+// TestConnectionMsg asks the app to test a raw connection string.
+type TestConnectionMsg struct{ ConnString string }
+
+// TestConnectionResultMsg carries the result of a test connection attempt.
+type TestConnectionResultMsg struct{ Err error }
+
+// UpdateExecDoneMsg carries the result of executing the UPDATE preview.
+type UpdateExecDoneMsg struct {
+	RowsAffected int64
+	Err          error
+}
+
 

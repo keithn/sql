@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,12 +20,14 @@ import (
 	"github.com/sqltui/sql/internal/export"
 	"github.com/sqltui/sql/internal/mcp"
 	"github.com/sqltui/sql/internal/screenshot"
+	"github.com/sqltui/sql/internal/ui/celledit"
 	"github.com/sqltui/sql/internal/ui/cellview"
 	"github.com/sqltui/sql/internal/ui/editor"
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
 	"github.com/sqltui/sql/internal/ui/results"
 	"github.com/sqltui/sql/internal/ui/schema"
+	"github.com/sqltui/sql/internal/ui/updatepreview"
 	"github.com/sqltui/sql/internal/workspace"
 )
 
@@ -49,6 +52,7 @@ const (
 	commandPaletteBrowseSnippets     = "command.browse_snippets"
 	confirmRunFullBuffer             = "confirm.run_full_buffer"
 	confirmRunFullBufferTx           = "confirm.run_full_buffer_transaction"
+	confirmDeleteConnection          = "confirm.delete_connection."
 
 	exportCSV       = "export.csv"
 	exportMarkdown  = "export.markdown"
@@ -91,7 +95,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.modal, cmd = m.modal.Update(msg)
 			return m, cmd
 		}
-		if m.palette.Active() && m.palette.QuickAddEnabled() && (msg.String() == "ctrl+n" || msg.String() == "a") {
+		if m.palette.Active() && m.palette.QuickAddEnabled() && msg.String() == "ctrl+n" {
 			m = m.closePalette()
 			return m.openAddConnectionModal()
 		}
@@ -118,9 +122,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.snippetSaveOpen {
 			return m.handleSnippetSaveKey(msg)
 		}
-		// When the cell edit prompt is open, handle it exclusively.
-		if m.cellEditOpen {
-			return m.handleCellEditKey(msg)
+		// When the cell edit overlay is open, handle it exclusively.
+		if m.cellEdit.Active() {
+			var cmd tea.Cmd
+			m.cellEdit, cmd = m.cellEdit.Update(msg)
+			return m, cmd
+		}
+		// When the update preview panel is open, handle it exclusively.
+		if m.updatePreview.Active() {
+			var cmd tea.Cmd
+			m.updatePreview, cmd = m.updatePreview.Update(msg)
+			return m, cmd
 		}
 		// When the results filter, poll, limit bar, or row detail is open, bypass global key shortcuts.
 		if m.results.FilterOpen() || m.results.PollOpen() || m.results.LimitOpen() || m.results.RowDetailOpen() {
@@ -191,6 +203,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case palette.DeleteMsg:
+		if m.palette.Kind() == palette.KindConnections {
+			name := msg.Key
+			return m.openDeleteConnectionConfirm(name)
+		}
 		// Delete snippet by key (which is the numeric ID as a string).
 		return m.handleSnippetDelete(msg.Key)
 
@@ -231,6 +247,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.closeModal()
 		return m, nil
 
+	case modal.TestConnectionMsg:
+		cs := msg.ConnString
+		return m, func() tea.Msg {
+			_, _, err := db.DetectAndConnect(context.Background(), cs)
+			return TestConnectionResultMsg{Err: err}
+		}
+
+	case TestConnectionResultMsg:
+		if msg.Err != nil {
+			m.modal = m.modal.SetTestStatus("✗ " + msg.Err.Error())
+		} else {
+			m.modal = m.modal.SetTestStatus("✓ Connected")
+		}
+		return m, nil
+
 	case modal.ConfirmedMsg:
 		switch msg.ID {
 		case confirmRunFullBuffer:
@@ -246,6 +277,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.closeModal()
 			return m.executeSQLInTransaction("BUFFER_TX", sql)
 		default:
+			if strings.HasPrefix(msg.ID, confirmDeleteConnection) {
+				name := strings.TrimPrefix(msg.ID, confirmDeleteConnection)
+				m = m.closeModal()
+				if err := connections.DeleteManaged(name, m.cfg); err != nil {
+					m.statusbar = m.statusbar.SetError("delete connection: " + err.Error())
+				} else {
+					m.statusbar = m.statusbar.SetError("Deleted connection: " + name)
+				}
+				return m, nil
+			}
 			m = m.closeModal()
 			return m, nil
 		}
@@ -520,6 +561,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar = m.statusbar.SetError("copied to clipboard")
 		}
 		return m, nil
+
+	case celledit.SubmittedMsg:
+		ctx := m.cellEditCtx
+		if ctx.ColName == "" {
+			return m, nil
+		}
+		var updateSQL string
+		if msg.SetNull {
+			updateSQL = generateUpdateSQL(ctx, nil, m.lastSQL)
+		} else {
+			updateSQL = generateUpdateSQL(ctx, msg.NewValue, m.lastSQL)
+		}
+		if updateSQL == "" {
+			m.statusbar = m.statusbar.SetError("cannot generate UPDATE: could not determine table or PK")
+			return m, nil
+		}
+		m.statusbar = m.statusbar.SetError("")
+		m.updatePreview = m.updatePreview.Open(updateSQL)
+		return m, nil
+
+	case celledit.CancelledMsg:
+		return m, nil
+
+	case results.EditCellMsg:
+		return m.openCellEditWithContext(msg.Ctx)
+
+	case updatepreview.ExecuteMsg:
+		if m.session == nil {
+			m.updatePreview = m.updatePreview.SetResult(0, fmt.Errorf("not connected"))
+			return m, nil
+		}
+		sql := msg.SQL
+		sess := m.session
+		return m, func() tea.Msg {
+			n, err := sess.Exec(context.Background(), sql)
+			return UpdateExecDoneMsg{RowsAffected: n, Err: err}
+		}
+
+	case UpdateExecDoneMsg:
+		m.updatePreview = m.updatePreview.SetResult(msg.RowsAffected, msg.Err)
+		if msg.Err == nil && m.session != nil && m.lastSQL != "" {
+			m.results = m.results.SetLoading(true)
+			return m, executeCmd(m.session, m.lastSQL)
+		}
+		return m, nil
+
+	case updatepreview.CopyMsg:
+		if err := writeClipboard(msg.SQL); err != nil {
+			m.statusbar = m.statusbar.SetError("clipboard: " + err.Error())
+		} else {
+			m.statusbar = m.statusbar.SetError("UPDATE copied to clipboard")
+		}
+		return m, nil
+
+	case updatepreview.CloseMsg:
+		m.updatePreview = m.updatePreview.Close()
+		return m, nil
 	}
 
 	return m.routeToFocused(msg)
@@ -633,12 +731,13 @@ func (m Model) openConnectionSwitcher() (tea.Model, tea.Cmd) {
 	items := make([]palette.Item, 0, len(infos))
 	for _, info := range infos {
 		items = append(items, palette.Item{
-			Key:     info.Name,
-			Title:   info.Name,
-			Badge:   paletteDriverBadge(info.Driver),
-			Driver:  info.Driver,
-			Summary: info.Summary,
-			Search:  info.Driver + " connection",
+			Key:       info.Name,
+			Title:     info.Name,
+			Badge:     paletteDriverBadge(info.Driver),
+			Driver:    info.Driver,
+			Summary:   info.Summary,
+			Search:    info.Driver + " connection",
+			Deletable: info.Managed,
 		})
 	}
 	var cmd tea.Cmd
@@ -972,94 +1071,48 @@ func (m Model) handleSnippetDelete(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// openCellEdit opens the inline cell edit prompt for the cursor cell.
+// openCellEdit opens the cell edit popup overlay for the cursor cell.
 func (m Model) openCellEdit() (tea.Model, tea.Cmd) {
 	ctx, ok := m.results.CurrentCellContext()
 	if !ok {
 		m.statusbar = m.statusbar.SetError("no cell selected")
 		return m, nil
 	}
-	m.cellEditOpen = true
-	m.cellEditInput = []rune(ctx.Value)
-	m.cellEditCursor = len(m.cellEditInput)
-	m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, ctx.Value))
-	return m, nil
+	return m.openCellEditWithContext(ctx)
 }
 
-// handleCellEditKey processes keystrokes while the cell edit prompt is open.
-func (m Model) handleCellEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	ctx, ok := m.results.CurrentCellContext()
-	if !ok {
-		m.cellEditOpen = false
-		return m, nil
-	}
-	switch msg.String() {
-	case "esc", "ctrl+c":
-		m.cellEditOpen = false
-		m.cellEditInput = nil
-		m.statusbar = m.statusbar.SetError("")
-		return m, nil
-	case "enter":
-		newVal := string(m.cellEditInput)
-		m.cellEditOpen = false
-		m.cellEditInput = nil
-		updateSQL := generateUpdateSQL(ctx, newVal, m.lastSQL)
-		if updateSQL == "" {
-			m.statusbar = m.statusbar.SetError("cannot generate UPDATE: could not determine table or PK")
-			return m, nil
-		}
-		m.statusbar = m.statusbar.SetError("")
-		var focusCmd tea.Cmd
-		m, focusCmd = m.applyPaneFocus(PaneEditor)
-		var insertCmd tea.Cmd
-		m.editor, insertCmd = m.editor.InsertText(updateSQL)
-		return m, tea.Batch(focusCmd, insertCmd)
-	case "backspace", "ctrl+h":
-		if m.cellEditCursor > 0 && len(m.cellEditInput) > 0 {
-			m.cellEditInput = append(m.cellEditInput[:m.cellEditCursor-1], m.cellEditInput[m.cellEditCursor:]...)
-			m.cellEditCursor--
-		}
-		m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, string(m.cellEditInput)))
-		return m, nil
-	case "left":
-		if m.cellEditCursor > 0 {
-			m.cellEditCursor--
-		}
-		return m, nil
-	case "right":
-		if m.cellEditCursor < len(m.cellEditInput) {
-			m.cellEditCursor++
-		}
-		return m, nil
-	case "home", "ctrl+a":
-		m.cellEditCursor = 0
-		return m, nil
-	case "end", "ctrl+e":
-		m.cellEditCursor = len(m.cellEditInput)
-		return m, nil
-	default:
-		for _, r := range msg.String() {
-			m.cellEditInput = append(m.cellEditInput[:m.cellEditCursor], append([]rune{r}, m.cellEditInput[m.cellEditCursor:]...)...)
-			m.cellEditCursor++
-		}
-		m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, string(m.cellEditInput)))
-		return m, nil
-	}
+func (m Model) openCellEditWithContext(ctx results.CellContext) (tea.Model, tea.Cmd) {
+	m.cellEditCtx = ctx
+	m.cellEdit = m.cellEdit.SetVimMode(m.editor.VimMode() != "")
+	var cmd tea.Cmd
+	m.cellEdit, cmd = m.cellEdit.Open(ctx.ColName, ctx.Value)
+	return m, cmd
 }
 
 // generateUpdateSQL produces an UPDATE statement for the given cell edit.
-func generateUpdateSQL(ctx results.CellContext, newVal, lastSQL string) string {
+// newVal may be a string (user-typed value) or nil (to set NULL).
+func generateUpdateSQL(ctx results.CellContext, newVal any, lastSQL string) string {
 	table := export.ExtractTableName(lastSQL)
 	if table == "" {
 		return ""
 	}
-	// Find the first likely PK column (named "id", or first column).
+	// Find the first likely PK column. Priority:
+	//   1. Exact name "id"
+	//   2. Name ends with "id" (e.g. lngTextMessageID, userId)
+	//   3. Column 0 as last resort
 	pkCol := -1
 	for i, col := range ctx.Columns {
-		name := strings.ToLower(col.Name)
-		if name == "id" {
+		if strings.EqualFold(col.Name, "id") {
 			pkCol = i
 			break
+		}
+	}
+	if pkCol < 0 {
+		for i, col := range ctx.Columns {
+			if strings.HasSuffix(strings.ToLower(col.Name), "id") {
+				pkCol = i
+				break
+			}
 		}
 	}
 	if pkCol < 0 && len(ctx.Columns) > 0 {
@@ -1083,13 +1136,36 @@ func formatSQLLiteral(v any) string {
 	if v == nil {
 		return "NULL"
 	}
+	// time.Time — format as SQL datetime string.
+	if t, ok := v.(time.Time); ok {
+		return "'" + formatTimeSQL(t) + "'"
+	}
+	// []byte comes back from some drivers (e.g. MSSQL varchar columns).
+	// Convert to string before any further processing.
+	if b, ok := v.([]byte); ok {
+		v = string(b)
+	}
 	s := fmt.Sprintf("%v", v)
-	// If numeric, return as-is.
-	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
-		return s
+	// If numeric (after trimming whitespace), return unquoted trimmed value.
+	trimmed := strings.TrimSpace(s)
+	if trimmed != "" {
+		if _, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return trimmed
+		}
 	}
 	// Escape single quotes.
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func formatTimeSQL(t time.Time) string {
+	t = t.UTC()
+	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+		return t.Format("2006-01-02")
+	}
+	if t.Nanosecond() == 0 {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return t.Format("2006-01-02 15:04:05.000")
 }
 
 func quoteIdent(name string) string {
@@ -1179,6 +1255,7 @@ func (m Model) handleMCPRequest(msg mcp.RequestMsg) (tea.Model, tea.Cmd) {
 		if m.session == nil {
 			return reply(nil, "not connected")
 		}
+		m.lastSQL = sql
 		// Store reply channel — will be signalled by QueryDoneMsg/QueryErrorMsg.
 		m.mcpQueryReply = msg.ReplyCh
 		m.results = m.results.SetLoading(true)
@@ -1500,6 +1577,20 @@ func (m Model) openAddConnectionModal() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) openDeleteConnectionConfirm(name string) (tea.Model, tea.Cmd) {
+	m = m.closePalette()
+	var cmd tea.Cmd
+	m.modal, cmd = m.modal.OpenConfirm(
+		confirmDeleteConnection+name,
+		"Delete connection?",
+		"Delete \""+name+"\" from saved connections? This cannot be undone.",
+		"Delete",
+	)
+	m.statusbar = m.statusbar.SetPane("CONFIRM")
+	m.statusbar = m.statusbar.SetError("")
+	return m, cmd
+}
+
 func (m Model) openRunFullBufferConfirmModal() (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.modal, cmd = m.modal.OpenConfirm(confirmRunFullBuffer, "Run full buffer?", "This will execute the entire current SQL buffer. Are you sure you want to continue?", "Run full buffer")
@@ -1536,7 +1627,11 @@ func (m Model) closeModal() Model {
 }
 
 func (m Model) openHelpScreen() (tea.Model, tea.Cmd) {
-	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 24)).Open(m.helpSections())
+	initialTab := HelpTabEditor
+	if m.focused == PaneResults {
+		initialTab = HelpTabResults
+	}
+	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 26)).Open(m.helpTabs(), initialTab)
 	m.statusbar = m.statusbar.SetPane("HELP")
 	m.statusbar = m.statusbar.SetError("")
 	return m, nil
@@ -1655,8 +1750,10 @@ func (m Model) applySize() (tea.Model, tea.Cmd) {
 	m.schema = m.schema.SetSize(m.width, m.height)
 	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 24))
 	m.cellView = m.cellView.SetSize(m.width, m.height)
+	m.cellEdit = m.cellEdit.SetSize(m.width, m.height)
+	m.updatePreview = m.updatePreview.SetSize(m.width, m.height)
 	m.palette = m.palette.SetSize(layout.contentW-6, minInt(m.height-4, 12))
-	m.modal = m.modal.SetSize(layout.contentW-4, minInt(m.height-4, 14))
+	m.modal = m.modal.SetSize(layout.contentW-4, minInt(m.height-4, 22))
 	m.statusbar = m.statusbar.SetWidth(m.width)
 
 	return m, nil

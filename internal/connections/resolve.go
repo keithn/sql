@@ -24,6 +24,7 @@ type NamedInfo struct {
 	Name    string
 	Driver  string
 	Summary string
+	Managed bool // true if stored in the managed JSON store (can be deleted)
 }
 
 func StorePath() (string, error) {
@@ -55,6 +56,15 @@ func Names(cfg *config.Config) ([]string, error) {
 }
 
 func List(cfg *config.Config) ([]NamedInfo, error) {
+	store, err := LoadManagedStore()
+	if err != nil {
+		return nil, err
+	}
+	managedNames := map[string]bool{}
+	for _, e := range store.All() {
+		managedNames[e.Name] = true
+	}
+
 	named, err := mergedNamedConnections(cfg)
 	if err != nil {
 		return nil, err
@@ -67,7 +77,7 @@ func List(cfg *config.Config) ([]NamedInfo, error) {
 	infos := make([]NamedInfo, 0, len(names))
 	for _, name := range names {
 		conn := named[name]
-		infos = append(infos, NamedInfo{Name: name, Driver: conn.driver, Summary: connectionSummary(conn.driver, conn.params)})
+		infos = append(infos, NamedInfo{Name: name, Driver: conn.driver, Summary: connectionSummary(conn.driver, conn.params), Managed: managedNames[name]})
 	}
 	return infos, nil
 }
