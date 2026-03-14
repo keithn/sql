@@ -8,7 +8,7 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 
 - **Multi-database** — SQL Server, PostgreSQL, SQLite (pure Go, no CGo)
 - **Named/saved connections** — raw DSNs, saved connections, keychain-backed passwords, last-used connection restore, and auto-reconnect on dropped connections
-- **Connection management in-app** — `Ctrl+K` switcher, `Ctrl+N` add-connection modal
+- **Connection management in-app** — `Ctrl+K` switcher (with `Ctrl+D` to delete); `Ctrl+N` add-connection modal with connection-string or form-builder mode
 - **Command + history palettes** — `Ctrl+P` for app actions (including snippets), `Ctrl+H` for recent SQL
 - **Named snippets** — save/browse/paste reusable SQL blocks from the command palette
 - **Smart block execution** — `Ctrl+E` runs the logical statement under the cursor; `F5` runs the full buffer
@@ -23,7 +23,7 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 - **Row detail view** — `Enter` opens a vertical column/value overlay; navigate rows with `h`/`l`
 - **Row tagging** — `Space` tags rows; `V` range-tag; `Ctrl+A` tag all/clear; tagged rows highlighted; export respects selection
 - **Result diff/pin** — `p` pins the current result; re-running the same query shows added/removed/changed rows
-- **Cell edit → UPDATE** — `e` opens an inline editor pre-filled with the cell value; confirms by pasting a ready-to-run UPDATE into the editor
+- **Cell edit → UPDATE** — `e` in the results grid or row detail view opens an inline cell editor (with vim mode); on confirm an UPDATE preview panel appears showing the generated SQL — execute it with `Ctrl+E`, copy with `y`, close with `Esc`; results refresh automatically on success; `Ctrl+D` sets the value to NULL
 - **Export** — `E` in results: CSV, Markdown, JSON, or SQL INSERT — to clipboard or file
 - **Screenshot** — `F10` captures the current view to clipboard or file
 - **MCP server mode** — `--mcp` starts a background JSON-RPC server so Claude Code can drive the TUI as an agent
@@ -170,7 +170,7 @@ Command palette (`Ctrl+P`) also exposes:
 | `Space` | Tag / untag current row |
 | `V` | Range-tag rows |
 | `Ctrl+A` | Tag all rows / clear all tags |
-| `e` | Edit cell → paste UPDATE into editor |
+| `e` | Edit cell → UPDATE preview panel |
 | `E` | Export (CSV / Markdown / JSON / SQL INSERT) |
 | `y` | Copy current cell to clipboard |
 | `Ctrl+L` | Toggle results fullscreen |
@@ -184,6 +184,25 @@ Command palette (`Ctrl+P`) also exposes:
 | `h` / `←` | Previous row |
 | `l` / `→` | Next row |
 | `y` | Copy focused field to clipboard |
+| `e` | Edit focused cell → UPDATE preview panel |
+| `Esc` | Close |
+
+### Cell edit overlay
+
+| Key | Action |
+|-----|--------|
+| Type | Edit value (vim mode supported) |
+| `Ctrl+S` | Confirm and open UPDATE preview |
+| `Ctrl+D` | Set value to NULL and open UPDATE preview |
+| `Esc` | Cancel |
+
+### UPDATE preview panel
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+E` / `Enter` | Execute UPDATE |
+| `y` / `Ctrl+C` | Copy SQL to clipboard |
+| `↑` / `↓` / `j` / `k` | Scroll |
 | `Esc` | Close |
 
 ### Schema browser
