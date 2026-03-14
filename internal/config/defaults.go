@@ -8,6 +8,7 @@ func defaults() *Config {
 			VimMode:          false,
 			Wrap:             false,
 			RowLimit:         10000,
+			ResultLimit:      500,
 			Theme:            "dark",
 			ChromaTheme:      "monokai",
 			FontWidth:        1,

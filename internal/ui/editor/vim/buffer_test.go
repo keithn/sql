@@ -413,3 +413,60 @@ func TestStateUndo(t *testing.T) {
 		t.Errorf("expected 'hello' after undo, got %q", s.Buf.Value())
 	}
 }
+
+func TestReplaceChar(t *testing.T) {
+	// Basic r: replace single char
+	s := NewState()
+	s.Buf.SetValue("hello")
+	s.HandleKey("r")
+	s.HandleKey("x")
+	if got := s.Buf.Value(); got != "xello" {
+		t.Errorf("want %q, got %q", "xello", got)
+	}
+	if s.Mode != ModeNormal {
+		t.Errorf("expected normal mode after r, got %v", s.Mode)
+	}
+
+	// Count prefix: 3r* replaces 3 chars
+	s2 := NewState()
+	s2.Buf.SetValue("hello world")
+	s2.HandleKey("3")
+	s2.HandleKey("r")
+	s2.HandleKey("*")
+	if got := s2.Buf.Value(); got != "***lo world" {
+		t.Errorf("want %q, got %q", "***lo world", got)
+	}
+	// cursor should land on last replaced char (col 2)
+	if s2.Buf.CursorCol() != 2 {
+		t.Errorf("want cursor col 2, got %d", s2.Buf.CursorCol())
+	}
+
+	// Esc cancels pending r
+	s3 := NewState()
+	s3.Buf.SetValue("hello")
+	s3.HandleKey("r")
+	s3.HandleKey("esc")
+	if got := s3.Buf.Value(); got != "hello" {
+		t.Errorf("r+esc should leave buffer unchanged, got %q", got)
+	}
+
+	// r on empty line does nothing
+	s4 := NewState()
+	s4.Buf.SetValue("")
+	s4.HandleKey("r")
+	s4.HandleKey("x")
+	if got := s4.Buf.Value(); got != "" {
+		t.Errorf("r on empty line should be no-op, got %q", got)
+	}
+
+	// Count clamped to line length
+	s5 := NewState()
+	s5.Buf.SetValue("hi")
+	s5.HandleKey("1")
+	s5.HandleKey("0")
+	s5.HandleKey("r")
+	s5.HandleKey("-")
+	if got := s5.Buf.Value(); got != "--" {
+		t.Errorf("want %q (clamped count), got %q", "--", got)
+	}
+}

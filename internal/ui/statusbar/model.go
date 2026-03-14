@@ -40,6 +40,12 @@ var (
 		Bold(true).
 		Padding(0, 1)
 
+	mcpStyle = lipgloss.NewStyle().
+		Background(lipgloss.Color("#6a0dad")).
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true).
+		Padding(0, 1)
+
 	metaStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#007acc")).
 			Foreground(lipgloss.Color("#cce7ff")).
@@ -53,10 +59,12 @@ type Model struct {
 	database   string
 	vimMode    string // "NORMAL", "INSERT", "VISUAL", "V-LINE", or ""
 	txActive   bool
+	mcpActive  bool
 	rowCount   int
 	durationMs int64
 	errMsg     string
 	pane       string // "EDITOR", "RESULTS", "SCHEMA"
+	colType    string // SQL type of cursor column in results (shown when results focused)
 }
 
 func New() Model {
@@ -91,6 +99,11 @@ func (m Model) View() string {
 		left += txStyle.Render("TXN")
 	}
 
+	// MCP server indicator.
+	if m.mcpActive {
+		left += mcpStyle.Render("MCP")
+	}
+
 	// Right side segments.
 	var right string
 	if m.errMsg != "" {
@@ -105,14 +118,35 @@ func (m Model) View() string {
 
 	right += metaStyle.Render(m.pane)
 
-	// Pad the middle.
-	leftLen := lipgloss.Width(left)
-	rightLen := lipgloss.Width(right)
-	gap := m.width - leftLen - rightLen
-	if gap < 0 {
-		gap = 0
+	// Column type hint shown in the middle when results pane is focused.
+	var middle string
+	if m.colType != "" && m.errMsg == "" {
+		colTypeSty := lipgloss.NewStyle().
+			Background(lipgloss.Color("#007acc")).
+			Foreground(lipgloss.Color("#9cdcfe")).
+			Padding(0, 1)
+		colTypeLabel := colTypeSty.Render(m.colType)
+		leftLen := lipgloss.Width(left)
+		rightLen := lipgloss.Width(right)
+		labelLen := lipgloss.Width(colTypeLabel)
+		gapTotal := m.width - leftLen - rightLen - labelLen
+		if gapTotal < 0 {
+			gapTotal = 0
+		}
+		gapLeft := gapTotal / 2
+		gapRight := gapTotal - gapLeft
+		middle = barStyle.Render(fmt.Sprintf("%*s", gapLeft, "")) +
+			colTypeLabel +
+			barStyle.Render(fmt.Sprintf("%*s", gapRight, ""))
+	} else {
+		leftLen := lipgloss.Width(left)
+		rightLen := lipgloss.Width(right)
+		gap := m.width - leftLen - rightLen
+		if gap < 0 {
+			gap = 0
+		}
+		middle = barStyle.Render(fmt.Sprintf("%*s", gap, ""))
 	}
-	middle := barStyle.Render(fmt.Sprintf("%*s", gap, ""))
 
 	return left + middle + right
 }
@@ -126,3 +160,5 @@ func (m Model) SetRows(n int) Model        { m.rowCount = n; return m }
 func (m Model) SetDuration(ms int64) Model { m.durationMs = ms; return m }
 func (m Model) SetError(s string) Model    { m.errMsg = s; return m }
 func (m Model) SetPane(s string) Model     { m.pane = s; return m }
+func (m Model) SetColType(s string) Model  { m.colType = s; return m }
+func (m Model) SetMCPMode(on bool) Model   { m.mcpActive = on; return m }

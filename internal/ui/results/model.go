@@ -1,8 +1,10 @@
 package results
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -78,41 +80,107 @@ type CellYankMsg struct {
 	Text string
 }
 
+// StartPollMsg is sent when the user confirms a poll interval.
+// Seconds == 0 means stop polling.
+type StartPollMsg struct {
+	Seconds int
+}
+
+// StartLimitMsg is sent when the user confirms a result limit change.
+type StartLimitMsg struct {
+	Limit int // 0 means reset to default
+}
+
 // FilterConfirmedMsg is sent when the user confirms a filter so the app can persist history.
 type FilterConfirmedMsg struct {
 	Pattern string
 }
 
+// activeFilter is one confirmed column-level regex filter.
+type activeFilter struct {
+	Col     int
+	ColName string
+	Pattern string
+	RE      *regexp.Regexp
+}
+
 // Model is the results pane.
 type Model struct {
-	width     int
-	height    int
-	results   []db.QueryResult
-	active    int
-	loading   bool
-	errMsg    string
-	scrollRow int
-	scrollCol int
-	colWidths []int
-	focused   bool
-	cursorRow int
-	cursorCol int
+	width      int
+	height     int
+	results    []db.QueryResult
+	active     int
+	loading    bool
+	errMsg     string
+	scrollRow  int
+	scrollCol  int
+	colWidths  []int
+	focused    bool
+	cursorRow  int
+	cursorCol  int
+	showRowNums bool // # key toggles leading row-number column
+
+	// Column sort state.
+	sortCol  int  // column index being sorted; -1 = none
+	sortAsc  bool // true = ascending, false = descending
+	// sortedRows holds a sorted copy of the active result's rows (nil = no sort).
+	sortedRows [][]any
+
+	// Poll interval input bar.
+	pollOpen  bool
+	pollInput []rune
+	pollSecs  int // active poll interval in seconds (0 = off), set by app via SetPollSecs
+
+	// Result limit input bar.
+	limitOpen        bool
+	limitInput       []rune
+	resultLimit      int // active result limit (0 = default, shown as 500)
 
 	// Column display filter — narrows what is shown in the filtered column's cells.
+	// filters holds all confirmed stacked filters (one per column).
+	filters       []activeFilter
 	filterOpen    bool
 	filterInput   []rune
 	filterCursor  int
-	filterCol     int    // column index being filtered; -1 = none
-	filterColName string // name of the filtered column (for persistence check across refreshes)
-	filterPattern string // confirmed active regex pattern
-	filterRE      *regexp.Regexp
+	filterCol     int    // column index targeted by the open input bar; -1 = none
+	filterColName string // column name targeted by the open input bar
+	filterRE      *regexp.Regexp // live preview RE while the bar is open (not confirmed)
 	filterErr     string // live regex parse error while typing
 	filterHistory []string
 	filterHistSel int // -1 = not showing history
+
+	// Row detail view (Enter key while focused on results grid).
+	rowDetailOpen   bool
+	rowDetailCursor int // which field (column) is focused in the detail view
+
+	// Row tagging for selective export.
+	tags          map[int]bool // underlying row index → tagged
+	tagRange      bool         // true when visual range-tag mode is active (V key)
+	tagRangeStart int          // row index where V was pressed
+
+	// Pin / diff mode.
+	pinnedResult *db.QueryResult // baseline pinned result; nil = not pinned
+	diffMode     bool            // true when showing a diff against pinnedResult
+	diffRows     []diffRow       // computed diff rows; valid when diffMode == true
+}
+
+type diffStatus int
+
+const (
+	diffSame    diffStatus = iota
+	diffAdded              // row is new (not in pinned)
+	diffRemoved            // row was in pinned but not in new
+	diffChanged            // row exists in both but has changed cells
+)
+
+type diffRow struct {
+	status diffStatus
+	row    []any     // current values (for added/same/changed) or pinned values (for removed)
+	pinned []any     // pinned values (nil for added rows)
 }
 
 func New() Model {
-	return Model{filterCol: -1, filterHistSel: -1}
+	return Model{filterCol: -1, filterHistSel: -1, sortCol: -1}
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -120,15 +188,22 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.rowDetailOpen {
+			return m.updateRowDetail(msg)
+		}
+		if m.pollOpen {
+			return m.updatePoll(msg)
+		}
+		if m.limitOpen {
+			return m.updateLimit(msg)
+		}
 		if m.filterOpen {
 			return m.updateFilter(msg)
 		}
 
 		rs := m.activeResult()
-		total := 0
-		if rs != nil {
-			total = len(rs.Rows)
-		}
+		activeRows := m.activeRows()
+		total := len(activeRows)
 		vis := m.visibleRows()
 		maxScroll := total - vis
 		if maxScroll < 0 {
@@ -140,6 +215,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "esc":
+			if m.tagRange {
+				m.tagRange = false
+				return m, nil
+			}
 		case "up", "k":
 			if m.cursorRow > 0 {
 				m.cursorRow--
@@ -223,9 +303,89 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, nil
 		case "y":
-			if rs != nil && m.cursorRow < len(rs.Rows) && m.cursorCol < len(rs.Rows[m.cursorRow]) {
-				text := formatCellRaw(rs.Rows[m.cursorRow][m.cursorCol])
+			if m.cursorRow < len(activeRows) && m.cursorCol < len(activeRows[m.cursorRow]) {
+				text := formatCellRaw(activeRows[m.cursorRow][m.cursorCol])
 				return m, func() tea.Msg { return CellYankMsg{Text: text} }
+			}
+			return m, nil
+		case "#":
+			m.showRowNums = !m.showRowNums
+			return m, nil
+		case "L":
+			m = m.OpenLimit()
+			return m, nil
+		case "s":
+			m = m.cycleSort()
+			return m, nil
+		case "p":
+			m = m.togglePin()
+			return m, nil
+		case "F":
+			// Clear all active stacked filters.
+			m.filters = nil
+			m.filterRE = nil
+			if rs != nil {
+				m.colWidths = computeColWidths(*rs)
+			}
+			return m, nil
+		case " ":
+			// Toggle tag on current row, advance cursor.
+			if m.tagRange {
+				// In range mode: confirm tagging the range.
+				lo, hi := m.tagRangeStart, m.cursorRow
+				if hi < lo {
+					lo, hi = hi, lo
+				}
+				if m.tags == nil {
+					m.tags = make(map[int]bool)
+				}
+				for i := lo; i <= hi; i++ {
+					m.tags[i] = true
+				}
+				m.tagRange = false
+			} else {
+				if m.tags == nil {
+					m.tags = make(map[int]bool)
+				}
+				m.tags[m.cursorRow] = !m.tags[m.cursorRow]
+				if !m.tags[m.cursorRow] {
+					delete(m.tags, m.cursorRow)
+				}
+				// Advance cursor for fast row tagging.
+				if m.cursorRow < total-1 {
+					m.cursorRow++
+					if m.cursorRow >= m.scrollRow+vis {
+						m.scrollRow = m.cursorRow - vis + 1
+					}
+				}
+			}
+			return m, nil
+		case "V":
+			// Toggle visual range-tag mode.
+			if m.tagRange {
+				m.tagRange = false
+			} else {
+				m.tagRange = true
+				m.tagRangeStart = m.cursorRow
+			}
+			return m, nil
+		case "ctrl+a":
+			// Tag all rows if any are untagged, otherwise clear all.
+			allTagged := total > 0 && len(m.tags) == total
+			if allTagged {
+				m.tags = nil
+			} else {
+				m.tags = make(map[int]bool, total)
+				for i := 0; i < total; i++ {
+					m.tags[i] = true
+				}
+			}
+			m.tagRange = false
+			return m, nil
+		case "enter":
+			if rs != nil && m.cursorRow < len(activeRows) {
+				m.rowDetailOpen = true
+				m.rowDetailCursor = 0
 			}
 			return m, nil
 		}
@@ -242,20 +402,27 @@ func (m Model) updateFilter(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.filterHistSel = -1
 		m.filterErr = ""
 		if pattern == "" {
-			m.filterPattern = ""
+			// Remove any existing filter for this column.
+			m.filters = removeFilter(m.filters, m.filterCol)
 			m.filterRE = nil
 			if rs := m.activeResult(); rs != nil {
-				m.colWidths = computeColWidths(*rs)
+				m.colWidths = computeColWidthsMulti(*rs, m.filters)
 			}
 		} else {
 			re, err := regexp.Compile(pattern)
 			if err != nil {
 				m.filterErr = err.Error()
 			} else {
-				m.filterPattern = pattern
-				m.filterRE = re
+				// Upsert: replace existing filter for this col, or append.
+				m.filters = upsertFilter(m.filters, activeFilter{
+					Col:     m.filterCol,
+					ColName: m.filterColName,
+					Pattern: pattern,
+					RE:      re,
+				})
+				m.filterRE = re // keep live RE in sync
 				if rs := m.activeResult(); rs != nil {
-					m.colWidths = computeColWidthsFiltered(*rs, m.filterCol, re)
+					m.colWidths = computeColWidthsMulti(*rs, m.filters)
 				}
 				// prepend to history, deduplicate
 				newHist := []string{pattern}
@@ -359,6 +526,549 @@ func (m Model) updateFilter(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 }
 
+// updatePoll handles all key input when the poll interval bar is open.
+func (m Model) updatePoll(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		input := strings.TrimSpace(string(m.pollInput))
+		m.pollOpen = false
+		m.pollInput = nil
+		var secs int
+		if input != "" {
+			n := 0
+			for _, ch := range input {
+				if ch < '0' || ch > '9' {
+					return m, nil // invalid; ignore silently
+				}
+				n = n*10 + int(ch-'0')
+			}
+			secs = n
+		}
+		return m, func() tea.Msg { return StartPollMsg{Seconds: secs} }
+	case "esc":
+		m.pollOpen = false
+		m.pollInput = nil
+		return m, nil
+	case "backspace":
+		if len(m.pollInput) > 0 {
+			m.pollInput = m.pollInput[:len(m.pollInput)-1]
+		}
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes {
+			for _, ch := range msg.Runes {
+				if ch >= '0' && ch <= '9' {
+					m.pollInput = append(m.pollInput, ch)
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// updateLimit handles all key input when the limit bar is open.
+func (m Model) updateLimit(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		input := strings.TrimSpace(string(m.limitInput))
+		m.limitOpen = false
+		m.limitInput = nil
+		var lim int
+		if input != "" {
+			n := 0
+			for _, ch := range input {
+				if ch < '0' || ch > '9' {
+					return m, nil // invalid; ignore
+				}
+				n = n*10 + int(ch-'0')
+			}
+			lim = n
+		}
+		m.resultLimit = lim
+		return m, func() tea.Msg { return StartLimitMsg{Limit: lim} }
+	case "esc":
+		m.limitOpen = false
+		m.limitInput = nil
+		return m, nil
+	case "backspace":
+		if len(m.limitInput) > 0 {
+			m.limitInput = m.limitInput[:len(m.limitInput)-1]
+		}
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes {
+			for _, ch := range msg.Runes {
+				if ch >= '0' && ch <= '9' {
+					m.limitInput = append(m.limitInput, ch)
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// cycleSort cycles the sort state for the cursor column:
+// unsorted → asc → desc → unsorted.
+func (m Model) cycleSort() Model {
+	rs := m.activeResult()
+	if rs == nil || len(rs.Rows) == 0 {
+		return m
+	}
+	col := m.cursorCol
+	if col >= len(rs.Columns) {
+		return m
+	}
+	if m.sortCol != col {
+		// New column: start ascending.
+		m.sortCol = col
+		m.sortAsc = true
+	} else if m.sortAsc {
+		// Was ascending → descending.
+		m.sortAsc = false
+	} else {
+		// Was descending → clear sort.
+		m.sortCol = -1
+		m.sortedRows = nil
+		return m
+	}
+	m.sortedRows = m.buildSortedRows(*rs, col, m.sortAsc)
+	// Reset scroll/cursor when sort changes.
+	m.cursorRow = 0
+	m.scrollRow = 0
+	return m
+}
+
+func (m Model) buildSortedRows(rs db.QueryResult, col int, asc bool) [][]any {
+	sorted := make([][]any, len(rs.Rows))
+	copy(sorted, rs.Rows)
+	slices.SortStableFunc(sorted, func(a, b []any) int {
+		var av, bv any
+		if col < len(a) {
+			av = a[col]
+		}
+		if col < len(b) {
+			bv = b[col]
+		}
+		r := compareCell(av, bv)
+		if !asc {
+			r = -r
+		}
+		return r
+	})
+	return sorted
+}
+
+// compareCell compares two cell values for sorting purposes.
+func compareCell(a, b any) int {
+	if a == nil && b == nil {
+		return 0
+	}
+	if a == nil {
+		return -1 // NULLs first
+	}
+	if b == nil {
+		return 1
+	}
+	// Try numeric comparison.
+	af := toFloat(a)
+	bf := toFloat(b)
+	if af != nil && bf != nil {
+		return cmp.Compare(*af, *bf)
+	}
+	// Fall back to string comparison.
+	return cmp.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+}
+
+func toFloat(v any) *float64 {
+	var f float64
+	switch n := v.(type) {
+	case int:
+		f = float64(n)
+	case int32:
+		f = float64(n)
+	case int64:
+		f = float64(n)
+	case float32:
+		f = float64(n)
+	case float64:
+		f = n
+	default:
+		return nil
+	}
+	return &f
+}
+
+// activeRows returns the rows to display (sorted if a sort is active).
+func (m Model) activeRows() [][]any {
+	if m.sortedRows != nil {
+		return m.sortedRows
+	}
+	rs := m.activeResult()
+	if rs == nil {
+		return nil
+	}
+	return rs.Rows
+}
+
+// RowDetailOpen reports whether the row detail view is currently showing.
+func (m Model) RowDetailOpen() bool { return m.rowDetailOpen }
+
+// RowDetailView renders the row detail overlay sized to w×h (full terminal dimensions).
+func (m Model) RowDetailView(w, h int) string {
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#007acc")).
+		Width(w - 2).
+		Height(h - 2)
+	innerW := w - 4
+	innerH := h - 4
+	if innerW < 20 {
+		innerW = 20
+	}
+	if innerH < 5 {
+		innerH = 5
+	}
+	return border.Render(m.renderRowDetail(innerW, innerH))
+}
+
+// TagCount returns the number of tagged rows.
+func (m Model) TagCount() int { return len(m.tags) }
+
+// TaggedResult returns a QueryResult containing only the tagged rows from the
+// active result set.  Returns nil if no rows are tagged.
+func (m Model) TaggedResult() *db.QueryResult {
+	if len(m.tags) == 0 {
+		return nil
+	}
+	rs := m.activeResult()
+	if rs == nil {
+		return nil
+	}
+	rows := m.activeRows()
+	tagged := make([][]any, 0, len(m.tags))
+	for i, row := range rows {
+		if m.tags[i] {
+			tagged = append(tagged, row)
+		}
+	}
+	if len(tagged) == 0 {
+		return nil
+	}
+	result := *rs
+	result.Rows = tagged
+	return &result
+}
+
+// ActiveResult returns the active QueryResult, or nil if none.
+func (m Model) ActiveResult() *db.QueryResult { return m.activeResult() }
+
+// Pinned reports whether a result is currently pinned as diff baseline.
+func (m Model) Pinned() bool { return m.pinnedResult != nil }
+
+// DiffMode reports whether the current view is showing a diff.
+func (m Model) DiffMode() bool { return m.diffMode }
+
+// togglePin pins the current result as a diff baseline, or clears the pin/diff.
+func (m Model) togglePin() Model {
+	if m.pinnedResult != nil {
+		// Unpin.
+		m.pinnedResult = nil
+		m.diffMode = false
+		m.diffRows = nil
+		return m
+	}
+	rs := m.activeResult()
+	if rs == nil {
+		return m
+	}
+	// Deep-copy the result so future SetResults doesn't mutate it.
+	pinned := *rs
+	pinned.Rows = make([][]any, len(rs.Rows))
+	for i, row := range rs.Rows {
+		cp := make([]any, len(row))
+		copy(cp, row)
+		pinned.Rows[i] = cp
+	}
+	m.pinnedResult = &pinned
+	m.diffMode = false
+	m.diffRows = nil
+	return m
+}
+
+// columnsMatch returns true if two column slices have the same names.
+func columnsMatch(a, b []db.Column) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name {
+			return false
+		}
+	}
+	return true
+}
+
+// computeDiff produces a diffRow slice comparing pinned to current.
+// Row matching: uses first PK column if available, otherwise row index.
+func computeDiff(pinned, current db.QueryResult) []diffRow {
+	// Find PK column index.
+	pkCol := -1
+	for i, col := range current.Columns {
+		if col.Name == "id" || col.Name == "ID" {
+			pkCol = i
+			break
+		}
+	}
+
+	if pkCol >= 0 {
+		// Key-based matching.
+		pinnedByKey := make(map[string][]any, len(pinned.Rows))
+		for _, row := range pinned.Rows {
+			if pkCol < len(row) {
+				key := fmt.Sprintf("%v", row[pkCol])
+				pinnedByKey[key] = row
+			}
+		}
+		currentByKey := make(map[string][]any, len(current.Rows))
+		for _, row := range current.Rows {
+			if pkCol < len(row) {
+				key := fmt.Sprintf("%v", row[pkCol])
+				currentByKey[key] = row
+			}
+		}
+		var out []diffRow
+		// Added or changed.
+		for _, row := range current.Rows {
+			key := ""
+			if pkCol < len(row) {
+				key = fmt.Sprintf("%v", row[pkCol])
+			}
+			if pinnedRow, ok := pinnedByKey[key]; !ok {
+				out = append(out, diffRow{status: diffAdded, row: row})
+			} else if !rowsEqual(pinnedRow, row) {
+				out = append(out, diffRow{status: diffChanged, row: row, pinned: pinnedRow})
+			} else {
+				out = append(out, diffRow{status: diffSame, row: row})
+			}
+		}
+		// Removed.
+		for _, row := range pinned.Rows {
+			key := ""
+			if pkCol < len(row) {
+				key = fmt.Sprintf("%v", row[pkCol])
+			}
+			if _, ok := currentByKey[key]; !ok {
+				out = append(out, diffRow{status: diffRemoved, row: row})
+			}
+		}
+		return out
+	}
+
+	// Index-based matching.
+	maxLen := len(current.Rows)
+	if len(pinned.Rows) > maxLen {
+		maxLen = len(pinned.Rows)
+	}
+	out := make([]diffRow, 0, maxLen)
+	for i := 0; i < maxLen; i++ {
+		switch {
+		case i >= len(pinned.Rows):
+			out = append(out, diffRow{status: diffAdded, row: current.Rows[i]})
+		case i >= len(current.Rows):
+			out = append(out, diffRow{status: diffRemoved, row: pinned.Rows[i]})
+		case !rowsEqual(pinned.Rows[i], current.Rows[i]):
+			out = append(out, diffRow{status: diffChanged, row: current.Rows[i], pinned: pinned.Rows[i]})
+		default:
+			out = append(out, diffRow{status: diffSame, row: current.Rows[i]})
+		}
+	}
+	return out
+}
+
+func rowsEqual(a, b []any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if fmt.Sprintf("%v", a[i]) != fmt.Sprintf("%v", b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// updateRowDetail handles keys while the row detail view is open.
+func (m Model) updateRowDetail(msg tea.KeyMsg) (Model, tea.Cmd) {
+	rs := m.activeResult()
+	rows := m.activeRows()
+	if rs == nil || m.cursorRow >= len(rows) {
+		m.rowDetailOpen = false
+		return m, nil
+	}
+	numFields := len(rs.Columns)
+	switch msg.String() {
+	case "esc", "q":
+		m.rowDetailOpen = false
+	case "up", "k":
+		if m.rowDetailCursor > 0 {
+			m.rowDetailCursor--
+		}
+	case "down", "j":
+		if m.rowDetailCursor < numFields-1 {
+			m.rowDetailCursor++
+		}
+	case "left", "h":
+		if m.cursorRow > 0 {
+			m.cursorRow--
+		}
+	case "right", "l":
+		if m.cursorRow < len(rows)-1 {
+			m.cursorRow++
+		}
+	case "y":
+		row := rows[m.cursorRow]
+		if m.rowDetailCursor < len(row) {
+			text := formatCellRaw(row[m.rowDetailCursor])
+			return m, func() tea.Msg { return CellYankMsg{Text: text} }
+		}
+	}
+	return m, nil
+}
+
+// renderRowDetail renders a full-height vertical detail view for the cursor row.
+func (m Model) renderRowDetail(w, h int) string {
+	rs := m.activeResult()
+	rows := m.activeRows()
+	if rs == nil || m.cursorRow >= len(rows) {
+		return ""
+	}
+	row := rows[m.cursorRow]
+
+	// Compute column-name width.
+	nameW := 10
+	for _, col := range rs.Columns {
+		if n := len([]rune(col.Name)); n > nameW {
+			nameW = n
+		}
+	}
+	if nameW > 30 {
+		nameW = 30
+	}
+	valueW := w - nameW - 3 // 3 = " │ "
+	if valueW < 10 {
+		valueW = 10
+	}
+
+	var rdNameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9cdcfe"))
+	var rdValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d4d4d4"))
+	var rdCursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#264f78"))
+	var rdNullStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	var rdDivStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#444444"))
+	var rdHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	var rdTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#4ec9b0"))
+
+	contentH := h - 3 // title + hint + footer separator
+	if contentH < 1 {
+		contentH = 1
+	}
+
+	// Scroll so rowDetailCursor is visible.
+	scroll := 0
+	if m.rowDetailCursor >= contentH {
+		scroll = m.rowDetailCursor - contentH + 1
+	}
+
+	var sb strings.Builder
+	// Title
+	sb.WriteString(rdTitleStyle.Render(fmt.Sprintf("Row %d / %d", m.cursorRow+1, len(rows))))
+	sb.WriteByte('\n')
+	// Separator
+	sb.WriteString(rdDivStyle.Render(strings.Repeat("─", w)))
+	sb.WriteByte('\n')
+
+	for i := 0; i < contentH; i++ {
+		fieldIdx := scroll + i
+		if fieldIdx >= len(rs.Columns) {
+			sb.WriteString(strings.Repeat(" ", w) + "\n")
+			continue
+		}
+		col := rs.Columns[fieldIdx]
+		var rawVal any
+		if fieldIdx < len(row) {
+			rawVal = row[fieldIdx]
+		}
+		// Format name.
+		name := padRight(col.Name, nameW)
+		// Format value.
+		var valStr string
+		if rawVal == nil {
+			valStr = "∅"
+		} else {
+			valStr = formatCellRaw(rawVal)
+		}
+		// Truncate value to fit.
+		valRunes := []rune(valStr)
+		if len(valRunes) > valueW {
+			valStr = string(valRunes[:valueW-1]) + "…"
+		} else {
+			valStr = padRight(valStr, valueW)
+		}
+		div := rdDivStyle.Render(" │ ")
+		if fieldIdx == m.rowDetailCursor {
+			nameRendered := rdCursorStyle.Render(name)
+			valRendered := rdCursorStyle.Render(valStr)
+			sb.WriteString(nameRendered + div + valRendered + "\n")
+		} else if rawVal == nil {
+			sb.WriteString(rdNameStyle.Render(name) + div + rdNullStyle.Render(valStr) + "\n")
+		} else {
+			sb.WriteString(rdNameStyle.Render(name) + div + rdValueStyle.Render(valStr) + "\n")
+		}
+	}
+
+	// Footer hint
+	sb.WriteString(rdDivStyle.Render(strings.Repeat("─", w)) + "\n")
+	sb.WriteString(rdHintStyle.Render(
+		fmt.Sprintf("j/k: field  h/l: row  y: copy  Esc: close  field %d/%d",
+			m.rowDetailCursor+1, len(rs.Columns))))
+
+	return sb.String()
+}
+
+// OpenLimit opens the result limit input bar.
+func (m Model) OpenLimit() Model {
+	m.limitOpen = true
+	if m.resultLimit > 0 {
+		m.limitInput = []rune(fmt.Sprintf("%d", m.resultLimit))
+	} else {
+		m.limitInput = []rune("500")
+	}
+	return m
+}
+
+func (m Model) LimitOpen() bool { return m.limitOpen }
+
+// SetResultLimit sets the active result limit value (used for display).
+func (m Model) SetResultLimit(n int) Model { m.resultLimit = n; return m }
+
+// ResultLimit returns the active result limit (0 = default 500).
+func (m Model) ResultLimit() int { return m.resultLimit }
+
+// OpenPoll opens the poll interval input bar.
+func (m Model) OpenPoll() Model {
+	m.pollOpen = true
+	if m.pollSecs > 0 {
+		m.pollInput = []rune(fmt.Sprintf("%d", m.pollSecs))
+	} else {
+		m.pollInput = []rune("15")
+	}
+	return m
+}
+
+func (m Model) PollOpen() bool { return m.pollOpen }
+
+// SetPollSecs records the active poll interval so the view can display it.
+func (m Model) SetPollSecs(n int) Model { m.pollSecs = n; return m }
+
 // liveFilter compiles the current filter input and stores it for live preview.
 // Unlike confirming (Enter), this does not update filterPattern / history.
 func (m *Model) liveFilter() {
@@ -404,17 +1114,33 @@ func applyFilterRE(src string, re *regexp.Regexp) (string, bool) {
 	return strings.Join(parts, "  |  "), true
 }
 
-// filterCellDisplay returns what to show for a cell in the filtered column.
-// Collects all matches so OR patterns show every matched field.
+// filterCellDisplay returns what to show for a cell in a filtered column.
+// While the filter bar is open, the live RE is used for the target column.
+// For all confirmed stacked filters the confirmed RE is used.
+// Returns (display, matched) where matched=false means the cell should be dimmed.
 func (m Model) filterCellDisplay(val any, col int) (string, bool) {
-	if m.filterRE == nil || col != m.filterCol {
-		return formatCell(val), false
+	// If the filter bar is open and targeting this column, use live RE.
+	if m.filterOpen && col == m.filterCol {
+		if m.filterRE == nil {
+			return formatCell(val), true
+		}
+		result, matched := applyFilterRE(formatCellRaw(val), m.filterRE)
+		if !matched {
+			return formatCell(val), false
+		}
+		return result, true
 	}
-	result, matched := applyFilterRE(formatCellRaw(val), m.filterRE)
-	if !matched {
-		return formatCell(val), false
+	// Check confirmed filters.
+	for _, f := range m.filters {
+		if f.Col == col {
+			result, matched := applyFilterRE(formatCellRaw(val), f.RE)
+			if !matched {
+				return formatCell(val), false
+			}
+			return result, true
+		}
 	}
-	return result, true
+	return formatCell(val), false
 }
 
 func (m Model) View() string {
@@ -445,16 +1171,33 @@ func (m Model) View() string {
 
 	metaText := fmt.Sprintf("  %d rows  ·  %s  ·  result set %d of %d",
 		len(rs.Rows), rs.Duration.Round(time.Millisecond), m.active+1, len(m.results))
-	if m.filterRE != nil {
-		colName := ""
-		if m.filterCol >= 0 && m.filterCol < len(rs.Columns) {
-			colName = rs.Columns[m.filterCol].Name
+	if m.resultLimit > 0 && m.resultLimit != 500 {
+		metaText += filterActiveStyle.Render(fmt.Sprintf("  limit %d", m.resultLimit))
+	}
+	if m.pollSecs > 0 {
+		metaText += filterActiveStyle.Render(fmt.Sprintf("  ↻ every %ds", m.pollSecs))
+	}
+	for _, f := range m.filters {
+		metaText += filterActiveStyle.Render(fmt.Sprintf("  ⊞ [%s]: %s", f.ColName, f.Pattern))
+	}
+	if n := len(m.tags); n > 0 {
+		metaText += filterActiveStyle.Render(fmt.Sprintf("  ● %d tagged", n))
+	}
+	if m.pinnedResult != nil {
+		if m.diffMode {
+			metaText += filterActiveStyle.Render("  📌 DIFF")
+		} else {
+			metaText += filterActiveStyle.Render("  📌 pinned")
 		}
-		metaText += filterActiveStyle.Render(fmt.Sprintf("  ⊞ [%s]: %s", colName, m.filterPattern))
 	}
 	meta := metaStyle.Render(metaText)
 
-	grid := m.renderGrid(rs)
+	var grid string
+	if m.diffMode && len(m.diffRows) > 0 {
+		grid = m.renderDiffGrid(rs)
+	} else {
+		grid = m.renderGrid(rs)
+	}
 	return border.Render(title + header + meta + "\n" + grid)
 }
 
@@ -486,15 +1229,39 @@ func (m Model) renderResultTabs() string {
 	return strings.Join(tabs, "│")
 }
 
+var rowNumStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+
 func (m Model) renderGrid(rs db.QueryResult) string {
 	if len(rs.Columns) == 0 {
 		return metaStyle.Render("  (no columns)")
+	}
+
+	// Row-number column: width is the digit count of the last visible row + 1 for the "#" header.
+	rowNumW := 0
+	if m.showRowNums {
+		rowNumW = len(fmt.Sprintf("%d", len(rs.Rows)))
+		if rowNumW < 1 {
+			rowNumW = 1
+		}
+	}
+	// rowNumColW is total chars consumed by the row-num column (content + padding + separator).
+	rowNumColW := 0
+	if m.showRowNums {
+		rowNumColW = rowNumW + 3 // " " + digits + " " + "│"
+	}
+	// Tag gutter: 1 char (●) + │ = 2 chars, shown when any rows are tagged or range is active.
+	showTagGutter := len(m.tags) > 0 || m.tagRange
+	tagGutterW := 0
+	if showTagGutter {
+		tagGutterW = 2 // "●" + "│"
 	}
 
 	natural := m.colWidths
 	if len(natural) != len(rs.Columns) {
 		natural = computeColWidths(rs)
 	}
+
+	availW := m.width - rowNumColW - tagGutterW
 
 	widths := make([]int, len(natural))
 	for i, w := range natural {
@@ -512,8 +1279,8 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 			totalW++
 		}
 	}
-	if totalW <= m.width {
-		leftover := m.width - totalW
+	if totalW <= availW {
+		leftover := availW - totalW
 		for leftover > 0 {
 			grew := false
 			for i := range widths {
@@ -529,7 +1296,8 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 		}
 	}
 
-	total := len(rs.Rows)
+	rows := m.activeRows()
+	total := len(rows)
 	vis := m.visibleRows()
 	rowStart := m.scrollRow
 	if rowStart > total {
@@ -552,7 +1320,7 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 		if colEnd > colStart {
 			used++
 		}
-		capW := m.width - used - 2
+		capW := availW - used - 2
 		if capW >= 4 {
 			adjusted := make([]int, len(widths))
 			copy(adjusted, widths)
@@ -565,15 +1333,33 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 
 	var sb strings.Builder
 
-	// Header row — underline filtered column.
+	tagStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#dcdcaa"))
+	tagRangeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))
+
+	// Header row.
+	if showTagGutter {
+		sb.WriteString(rowNumStyle.Render("●") + headerStyle.Render("│"))
+	}
+	if m.showRowNums {
+		hdr := padRight("#", rowNumW)
+		sb.WriteString(rowNumStyle.Render(" "+hdr+" ") + headerStyle.Render("│"))
+	}
 	for i := colStart; i < colEnd; i++ {
 		name := rs.Columns[i].Name
+		// Append sort indicator.
+		if m.sortCol == i {
+			if m.sortAsc {
+				name += " ▲"
+			} else {
+				name += " ▼"
+			}
+		}
 		if runeLen(name) > widths[i] {
 			name = string([]rune(name)[:widths[i]-1]) + "…"
 		}
 		cell := padRight(name, widths[i])
 		sty := headerStyle
-		if m.filterRE != nil && i == m.filterCol {
+		if m.hasFilter(i) {
 			sty = sty.Underline(true)
 		}
 		sb.WriteString(sty.Render(" " + cell + " "))
@@ -584,6 +1370,13 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 	sb.WriteByte('\n')
 
 	// Separator.
+	if showTagGutter {
+		sb.WriteString("─┼")
+	}
+	if m.showRowNums {
+		sb.WriteString(strings.Repeat("─", rowNumW+2))
+		sb.WriteString("┼")
+	}
 	for i := colStart; i < colEnd; i++ {
 		sb.WriteString(strings.Repeat("─", widths[i]+2))
 		if i < colEnd-1 {
@@ -593,8 +1386,25 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 	sb.WriteByte('\n')
 
 	// Data rows.
-	for ri, row := range rs.Rows[rowStart:rowEnd] {
+	for ri, row := range rows[rowStart:rowEnd] {
 		absRow := rowStart + ri
+		if showTagGutter {
+			isTagged := m.tags[absRow]
+			inRange := m.tagRange && ((absRow >= m.tagRangeStart && absRow <= m.cursorRow) ||
+				(absRow <= m.tagRangeStart && absRow >= m.cursorRow))
+			switch {
+			case inRange:
+				sb.WriteString(tagRangeStyle.Render("◉") + "│")
+			case isTagged:
+				sb.WriteString(tagStyle.Render("●") + "│")
+			default:
+				sb.WriteString(" │")
+			}
+		}
+		if m.showRowNums {
+			numStr := padRight(fmt.Sprintf("%d", absRow+1), rowNumW)
+			sb.WriteString(rowNumStyle.Render(" "+numStr+" ") + "│")
+		}
 		for i := colStart; i < colEnd; i++ {
 			if i >= len(row) {
 				break
@@ -614,7 +1424,7 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 				sb.WriteString(cursorStyle.Render(" " + padded + " "))
 			case val == nil:
 				sb.WriteString(nullStyle.Render(" " + padded + " "))
-			case m.filterRE != nil && i == m.filterCol && !matched:
+			case m.hasFilter(i) && !matched:
 				sb.WriteString(noMatchStyle.Render(" " + padded + " "))
 			default:
 				sb.WriteString(cellStyle.Render(" " + padded + " "))
@@ -655,8 +1465,170 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 	if m.filterOpen {
 		sb.WriteString(m.renderFilterBar(rs))
 	}
+	if m.pollOpen {
+		sb.WriteString(m.renderPollBar())
+	}
+	if m.limitOpen {
+		sb.WriteString(m.renderLimitBar())
+	}
 
 	return sb.String()
+}
+
+// renderDiffGrid renders the results with diff highlighting.
+func (m Model) renderDiffGrid(rs db.QueryResult) string {
+	if len(rs.Columns) == 0 {
+		return metaStyle.Render("  (no columns)")
+	}
+
+	diffAddedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4ec9b0"))   // teal/green
+	diffRemovedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f44747")) // red
+	diffChangedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#dcdcaa")) // yellow
+	diffChangedCellStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffb347")) // orange
+
+	natural := m.colWidths
+	if len(natural) != len(rs.Columns) {
+		natural = computeColWidths(rs)
+	}
+	availW := m.width - 2 // 2 = diff gutter ("+"/"-"/" " + "│")
+
+	widths := make([]int, len(natural))
+	for i, w := range natural {
+		if w > maxColWidth {
+			widths[i] = maxColWidth
+		} else {
+			widths[i] = w
+		}
+	}
+
+	colStart, colEnd := m.visibleColRangeW(widths, availW)
+
+	rows := m.diffRows
+	total := len(rows)
+	vis := m.visibleRows()
+	rowStart := m.scrollRow
+	if rowStart > total {
+		rowStart = total
+	}
+	rowEnd := rowStart + vis
+	if rowEnd > total {
+		rowEnd = total
+	}
+
+	var sb strings.Builder
+
+	// Header.
+	sb.WriteString(headerStyle.Render("Δ") + headerStyle.Render("│"))
+	for i := colStart; i < colEnd; i++ {
+		name := rs.Columns[i].Name
+		padded := padRight(name, widths[i])
+		sb.WriteString(headerStyle.Render(" " + padded + " "))
+		if i < colEnd-1 {
+			sb.WriteString(headerStyle.Render("│"))
+		}
+	}
+	sb.WriteByte('\n')
+
+	// Separator.
+	sb.WriteString("──")
+	for i := colStart; i < colEnd; i++ {
+		sb.WriteString(strings.Repeat("─", widths[i]+2))
+		if i < colEnd-1 {
+			sb.WriteString("┼")
+		}
+	}
+	sb.WriteByte('\n')
+
+	// Data rows.
+	for ri, dr := range rows[rowStart:rowEnd] {
+		absRow := rowStart + ri
+		var marker string
+		var rowSty lipgloss.Style
+		switch dr.status {
+		case diffAdded:
+			marker = diffAddedStyle.Render("+")
+			rowSty = diffAddedStyle
+		case diffRemoved:
+			marker = diffRemovedStyle.Render("-")
+			rowSty = diffRemovedStyle
+		case diffChanged:
+			marker = diffChangedStyle.Render("~")
+			rowSty = diffChangedStyle
+		default:
+			marker = " "
+			rowSty = cellStyle
+		}
+		sb.WriteString(marker + "│")
+		row := dr.row
+		for i := colStart; i < colEnd; i++ {
+			var val any
+			if i < len(row) {
+				val = row[i]
+			}
+			raw := formatCellRaw(val)
+			if runeLen(raw) > widths[i] {
+				runes := []rune(raw)
+				raw = string(runes[:widths[i]-1]) + "…"
+			}
+			padded := padRight(raw, widths[i])
+			isCursor := m.focused && absRow == m.cursorRow && i == m.cursorCol
+			switch {
+			case isCursor:
+				sb.WriteString(cursorStyle.Render(" " + padded + " "))
+			case dr.status == diffChanged && dr.pinned != nil && i < len(dr.pinned) &&
+				fmt.Sprintf("%v", dr.pinned[i]) != fmt.Sprintf("%v", val):
+				sb.WriteString(diffChangedCellStyle.Render(" " + padded + " "))
+			default:
+				sb.WriteString(rowSty.Render(" " + padded + " "))
+			}
+			if i < colEnd-1 {
+				sb.WriteString("│")
+			}
+		}
+		sb.WriteByte('\n')
+	}
+
+	// Summary hint.
+	added, removed, changed := 0, 0, 0
+	for _, dr := range rows {
+		switch dr.status {
+		case diffAdded:
+			added++
+		case diffRemoved:
+			removed++
+		case diffChanged:
+			changed++
+		}
+	}
+	hint := fmt.Sprintf("  DIFF MODE (p: unpin)  +%d added  -%d removed  ~%d changed", added, removed, changed)
+	sb.WriteString(metaStyle.Render(hint) + "\n")
+
+	return sb.String()
+}
+
+// visibleColRangeW computes visible column range given an explicit available width.
+func (m Model) visibleColRangeW(widths []int, availW int) (int, int) {
+	colStart := m.scrollCol
+	if colStart >= len(widths) {
+		colStart = 0
+	}
+	used := 0
+	colEnd := colStart
+	for colEnd < len(widths) {
+		needed := widths[colEnd] + 2
+		if colEnd > colStart {
+			needed++ // separator
+		}
+		if used+needed > availW && colEnd > colStart {
+			break
+		}
+		used += needed
+		colEnd++
+	}
+	if colEnd <= colStart {
+		colEnd = colStart + 1
+	}
+	return colStart, colEnd
 }
 
 func (m Model) renderFilterBar(rs db.QueryResult) string {
@@ -726,6 +1698,28 @@ func (m Model) renderFilterInput() string {
 	return sb.String()
 }
 
+func (m Model) renderLimitBar() string {
+	prompt := filterPromptStyle.Render("⊕") + " Result limit (blank=500): "
+	var sb strings.Builder
+	for _, ch := range m.limitInput {
+		sb.WriteRune(ch)
+	}
+	sb.WriteString(cursorStyle.Render(" "))
+	hint := metaStyle.Render("  Enter confirm  Esc cancel")
+	return prompt + sb.String() + hint + "\n"
+}
+
+func (m Model) renderPollBar() string {
+	prompt := filterPromptStyle.Render("↻") + " Poll interval (seconds, blank=stop): "
+	var sb strings.Builder
+	for _, ch := range m.pollInput {
+		sb.WriteRune(ch)
+	}
+	sb.WriteString(cursorStyle.Render(" "))
+	hint := metaStyle.Render("  Enter confirm  Esc cancel")
+	return prompt + sb.String() + hint + "\n"
+}
+
 func (m Model) visibleColRange(widths []int) (start, end int) {
 	if len(widths) == 0 {
 		return 0, 0
@@ -762,21 +1756,30 @@ func (m Model) SetResults(sets []db.QueryResult) Model {
 	m.errMsg = ""
 	m.filterOpen = false
 	m.filterErr = ""
+	m.filters = nil
+	m.filterRE = nil
+	m.tags = nil
+	m.tagRange = false
 	m.scrollRow, m.scrollCol, m.cursorRow, m.cursorCol = 0, 0, 0, 0
+	// Reset sort and row detail state on new results.
+	m.sortCol = -1
+	m.sortedRows = nil
+	m.rowDetailOpen = false
+	m.rowDetailCursor = 0
 	if len(sets) > 0 {
 		rs := sets[0]
-		// Keep the active filter only if the column still exists at the same
-		// position with the same name.
-		if m.filterRE != nil {
-			if m.filterCol < 0 || m.filterCol >= len(rs.Columns) ||
-				rs.Columns[m.filterCol].Name != m.filterColName {
-				m.filterPattern = ""
-				m.filterRE = nil
-				m.filterCol = -1
-				m.filterColName = ""
-			}
+		m.colWidths = computeColWidths(rs)
+		// Compute diff if pinned and columns match.
+		if m.pinnedResult != nil && columnsMatch(m.pinnedResult.Columns, rs.Columns) {
+			m.diffMode = true
+			m.diffRows = computeDiff(*m.pinnedResult, rs)
+		} else {
+			m.diffMode = false
+			m.diffRows = nil
 		}
-		m.colWidths = computeColWidthsFiltered(rs, m.filterCol, m.filterRE)
+	} else {
+		m.diffMode = false
+		m.diffRows = nil
 	}
 	return m
 }
@@ -800,6 +1803,7 @@ func (m Model) FilterHistory() []string           { return m.filterHistory }
 func (m Model) FilterOpen() bool                  { return m.filterOpen }
 
 // OpenFilter opens the filter bar targeting the current cursor column.
+// If a confirmed filter already exists for that column it is pre-filled.
 func (m Model) OpenFilter() Model {
 	rs := m.activeResult()
 	newCol := 0
@@ -808,15 +1812,19 @@ func (m Model) OpenFilter() Model {
 		newCol = m.cursorCol
 		newColName = rs.Columns[m.cursorCol].Name
 	}
-	// If opening on a different column than the active filter, clear the pattern.
-	if newCol != m.filterCol || newColName != m.filterColName {
-		m.filterPattern = ""
-		m.filterRE = nil
-	}
 	m.filterCol = newCol
 	m.filterColName = newColName
+	// Prefill from any existing confirmed filter for this column.
+	existingPattern := ""
+	for _, f := range m.filters {
+		if f.Col == newCol {
+			existingPattern = f.Pattern
+			break
+		}
+	}
+	m.filterRE = nil
 	m.filterOpen = true
-	m.filterInput = []rune(m.filterPattern)
+	m.filterInput = []rune(existingPattern)
 	m.filterCursor = len(m.filterInput)
 	m.filterHistSel = -1
 	m.filterErr = ""
@@ -839,6 +1847,12 @@ func (m Model) visibleRows() int {
 			overhead += n + 2
 		}
 	}
+	if m.pollOpen {
+		overhead++
+	}
+	if m.limitOpen {
+		overhead++
+	}
 	n := m.height - overhead
 	if n < 1 {
 		return 1
@@ -853,24 +1867,141 @@ func (m Model) activeResult() *db.QueryResult {
 	return &m.results[m.active]
 }
 
-func (m Model) ActiveResult() *db.QueryResult { return m.activeResult() }
+// ActiveRows returns the current rows for the active result set, respecting
+// any active sort.  Returns nil if no results are loaded.
+func (m Model) ActiveRows() [][]any { return m.activeRows() }
+
+// CurrentColumnType returns the SQL type string for the cursor column,
+// or "" if no results are loaded.
+func (m Model) CurrentColumnType() string {
+	rs := m.activeResult()
+	if rs == nil || m.cursorCol >= len(rs.Columns) {
+		return ""
+	}
+	return rs.Columns[m.cursorCol].Type
+}
 
 func (m Model) CurrentCellRaw() (string, bool) {
-	rs := m.activeResult()
-	if rs == nil || m.cursorRow >= len(rs.Rows) {
+	rows := m.activeRows()
+	if rows == nil || m.cursorRow >= len(rows) {
 		return "", false
 	}
-	row := rs.Rows[m.cursorRow]
+	row := rows[m.cursorRow]
 	if m.cursorCol >= len(row) {
 		return "", false
 	}
 	return formatCellRaw(row[m.cursorCol]), true
 }
 
+// CellContext holds everything needed to generate an UPDATE statement for the cursor cell.
+type CellContext struct {
+	ColName  string
+	ColIndex int
+	Value    string // current string representation
+	Columns  []db.Column
+	Row      []any
+}
+
+// CurrentCellContext returns context for the cursor cell, or (CellContext{}, false) if unavailable.
+func (m Model) CurrentCellContext() (CellContext, bool) {
+	rs := m.activeResult()
+	rows := m.activeRows()
+	if rs == nil || m.cursorRow >= len(rows) || m.cursorCol >= len(rs.Columns) {
+		return CellContext{}, false
+	}
+	row := rows[m.cursorRow]
+	val := ""
+	if m.cursorCol < len(row) && row[m.cursorCol] != nil {
+		val = formatCellRaw(row[m.cursorCol])
+	}
+	return CellContext{
+		ColName:  rs.Columns[m.cursorCol].Name,
+		ColIndex: m.cursorCol,
+		Value:    val,
+		Columns:  rs.Columns,
+		Row:      row,
+	}, true
+}
+
 const maxColWidth = 40
 
 func computeColWidths(rs db.QueryResult) []int {
 	return computeColWidthsFiltered(rs, -1, nil)
+}
+
+// computeColWidthsMulti computes column widths applying all active stacked filters.
+func computeColWidthsMulti(rs db.QueryResult, filters []activeFilter) []int {
+	widths := make([]int, len(rs.Columns))
+	for i, c := range rs.Columns {
+		widths[i] = runeLen(c.Name)
+	}
+	// Build a map from col → RE for fast lookup.
+	reMap := make(map[int]*regexp.Regexp, len(filters))
+	for _, f := range filters {
+		reMap[f.Col] = f.RE
+	}
+	for _, row := range rs.Rows {
+		for i, val := range row {
+			if i >= len(widths) {
+				break
+			}
+			var s string
+			if re, ok := reMap[i]; ok {
+				if result, matched := applyFilterRE(formatCellRaw(val), re); matched {
+					s = result
+				} else {
+					s = formatCell(val)
+				}
+			} else {
+				s = formatCell(val)
+			}
+			if n := runeLen(s); n > widths[i] && n <= maxColWidth {
+				widths[i] = n
+			}
+		}
+	}
+	for i := range widths {
+		if widths[i] > maxColWidth {
+			widths[i] = maxColWidth
+		}
+		if widths[i] < 3 {
+			widths[i] = 3
+		}
+	}
+	return widths
+}
+
+// hasFilter reports whether a confirmed filter is active for the given column.
+func (m Model) hasFilter(col int) bool {
+	for _, f := range m.filters {
+		if f.Col == col {
+			return true
+		}
+	}
+	// Also include the live filter target while the bar is open.
+	return m.filterOpen && col == m.filterCol
+}
+
+// upsertFilter replaces an existing filter for the same column or appends a new one.
+func upsertFilter(filters []activeFilter, f activeFilter) []activeFilter {
+	for i, existing := range filters {
+		if existing.Col == f.Col {
+			filters[i] = f
+			return filters
+		}
+	}
+	return append(filters, f)
+}
+
+// removeFilter removes any filter for the given column.
+func removeFilter(filters []activeFilter, col int) []activeFilter {
+	out := filters[:0]
+	for _, f := range filters {
+		if f.Col != col {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // computeColWidthsFiltered computes natural column widths, using the filtered

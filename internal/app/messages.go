@@ -68,6 +68,25 @@ type ConnectedMsg struct {
 	DisplayName  string
 	WorkspaceKey string
 	Session      *db.Session
+	ConnectStr   string // the nameOrDSN used to connect (for auto-reconnect)
+}
+
+// ReconnectAndRetryMsg is sent when a dropped-connection error is detected.
+// The app will reconnect and retry the original SQL.
+type ReconnectAndRetryMsg struct {
+	SQL string
+}
+
+// ReconnectDoneMsg is sent when the background reconnect succeeds.
+type ReconnectDoneMsg struct {
+	Session    *db.Session
+	Results    []db.QueryResult
+	ConnectStr string
+}
+
+// ReconnectErrMsg is sent when the background reconnect fails.
+type ReconnectErrMsg struct {
+	Err error
 }
 
 // ConnectErrMsg signals a failed connection attempt.
@@ -92,4 +111,8 @@ type SchemaLoadedMsg struct {
 type SchemaTableSelectedMsg struct {
 	SQL string
 }
+
+// PollTickMsg is fired by the poller timer to trigger a re-execution.
+type PollTickMsg struct{}
+
 

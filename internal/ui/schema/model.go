@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -18,6 +19,23 @@ type TableSelectedMsg struct {
 
 // CancelledMsg is emitted when the user presses Esc.
 type CancelledMsg struct{}
+
+// CopyTableNameMsg asks the app to copy a qualified table name to the clipboard.
+type CopyTableNameMsg struct {
+	Name string
+}
+
+// RowCountRequestMsg is emitted when the user presses 'r' on a table to request its row count.
+type RowCountRequestMsg struct {
+	QualifiedName string // e.g. "dbo.Orders"
+}
+
+// RowCountResultMsg carries the result of a background row count query.
+type RowCountResultMsg struct {
+	QualifiedName string
+	Count         int64
+	Err           error
+}
 
 type tableEntry struct {
 	schemaName string
@@ -43,11 +61,15 @@ type Model struct {
 	filtered     []tableEntry
 	cursor       int
 	scroll       int
-	detailScroll int   // scroll offset into the all[] slice in renderDetail
-	detailFocus  bool  // true when arrow keys navigate the column list
-	detailCursor int   // which column is highlighted (0-based index into e.columns)
+	detailScroll int    // scroll offset into the all[] slice in renderDetail
+	detailFocus  bool   // true when arrow keys navigate the column list
+	detailCursor int    // which column is highlighted (0-based index into e.columns)
 	selectedCols []bool // per-column selection state; nil = no selection
+	searchFocus  bool   // true when the search input is active (vs the table list)
 	input        textinput.Model
+	resultLimit  int              // rows limit for generated SELECT statements (0 = use default 500)
+	rowCounts    map[string]int64 // qualified table name → cached row count (-1 = loading)
+	actionOpen   bool             // true when the 'a' action menu overlay is shown
 }
 
 var (
@@ -88,6 +110,7 @@ func (m Model) Open(initialFilter string) (Model, tea.Cmd) {
 	m.detailFocus = false
 	m.detailCursor = 0
 	m.selectedCols = nil
+	m.searchFocus = true
 	m.input.SetValue(initialFilter)
 	m.syncFiltered()
 	return m, m.input.Focus()
@@ -101,6 +124,7 @@ func (m Model) Close() Model {
 	m.detailFocus = false
 	m.detailCursor = 0
 	m.selectedCols = nil
+	m.searchFocus = false
 	m.input.Blur()
 	m.input.SetValue("")
 	m.filtered = nil
@@ -177,19 +201,57 @@ func (m Model) SetSize(w, h int) Model {
 	return m
 }
 
+// SetRowCount stores a cached row count for a qualified table name.
+func (m Model) SetRowCount(qualifiedName string, count int64) Model {
+	if m.rowCounts == nil {
+		m.rowCounts = make(map[string]int64)
+	}
+	m.rowCounts[qualifiedName] = count
+	return m
+}
+
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.active {
 		return m, nil
 	}
 	switch msg := msg.(type) {
+	case RowCountResultMsg:
+		if msg.Err == nil {
+			m = m.SetRowCount(msg.QualifiedName, msg.Count)
+		}
+		return m, nil
 	case tea.KeyMsg:
+		// Action menu overlay intercepts all keys.
+		if m.actionOpen {
+			return m.handleActionMenu(msg)
+		}
 		switch msg.String() {
 		case "esc", "ctrl+c":
 			if m.detailFocus {
 				m.detailFocus = false
 				return m, nil
 			}
+			if !m.searchFocus {
+				// Esc from list mode returns to search.
+				m.searchFocus = true
+				return m, m.input.Focus()
+			}
 			return m.Close(), func() tea.Msg { return CancelledMsg{} }
+
+		case "/":
+			// Always jump to search mode.
+			if !m.searchFocus && !m.detailFocus {
+				m.searchFocus = true
+				m.input.Blur()
+				return m, m.input.Focus()
+			}
+			// In search mode, let the input handle it.
+			if m.searchFocus {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				m.syncFiltered()
+				return m, cmd
+			}
 
 		case "tab":
 			if len(m.filtered) == 0 || m.cursor >= len(m.filtered) {
@@ -197,15 +259,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			m.detailFocus = !m.detailFocus
 			if m.detailFocus {
+				m.searchFocus = false
+				m.input.Blur()
 				e := m.filtered[m.cursor]
 				if len(m.selectedCols) != len(e.columns) {
 					m.selectedCols = make([]bool, len(e.columns))
 				}
-				// Ensure detailCursor is visible.
 				m.ensureDetailCursorVisible()
 			}
 
 		case "enter":
+			if m.searchFocus {
+				// Enter from search: move to list mode.
+				m.searchFocus = false
+				m.input.Blur()
+				return m, nil
+			}
 			if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 				e := m.filtered[m.cursor]
 				var sql string
@@ -231,42 +300,59 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						m.scroll = m.cursor
 					}
 				}
+				// Move up from list top returns to search.
+				if m.cursor == 0 && m.searchFocus == false {
+					// stay in list; don't snap back to search on up
+				}
 			}
 
 		case "k":
-			if m.detailFocus && m.detailCursor > 0 {
-				m.detailCursor--
-				m.ensureDetailCursorVisible()
-			} else if !m.detailFocus {
+			if m.detailFocus {
+				if m.detailCursor > 0 {
+					m.detailCursor--
+					m.ensureDetailCursorVisible()
+				}
+			} else if !m.searchFocus {
+				// k navigates list when list is active.
+				if m.cursor > 0 {
+					m.cursor--
+					m.resetDetailState()
+					if m.cursor < m.scroll {
+						m.scroll = m.cursor
+					}
+				}
+			} else {
+				// k in search mode: goes to input.
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
-				prev := m.cursor
 				m.syncFiltered()
-				if prev >= len(m.filtered) {
-					m.cursor = 0
-					m.scroll = 0
-				}
-				m.resetDetailState()
 				return m, cmd
 			}
 
 		case "j":
-			if m.detailFocus && len(m.filtered) > 0 && m.cursor < len(m.filtered) {
-				e := m.filtered[m.cursor]
-				if m.detailCursor < len(e.columns)-1 {
-					m.detailCursor++
-					m.ensureDetailCursorVisible()
+			if m.detailFocus {
+				if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+					e := m.filtered[m.cursor]
+					if m.detailCursor < len(e.columns)-1 {
+						m.detailCursor++
+						m.ensureDetailCursorVisible()
+					}
 				}
-			} else if !m.detailFocus {
+			} else if !m.searchFocus {
+				// j navigates list when list is active.
+				if m.cursor < len(m.filtered)-1 {
+					m.cursor++
+					m.resetDetailState()
+					visRows := m.visibleListRows()
+					if m.cursor >= m.scroll+visRows {
+						m.scroll = m.cursor - visRows + 1
+					}
+				}
+			} else {
+				// j in search mode: goes to input.
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
-				prev := m.cursor
 				m.syncFiltered()
-				if prev >= len(m.filtered) {
-					m.cursor = 0
-					m.scroll = 0
-				}
-				m.resetDetailState()
 				return m, cmd
 			}
 
@@ -278,6 +364,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.ensureDetailCursorVisible()
 				}
 			} else {
+				// Down from search: switch to list mode.
+				if m.searchFocus {
+					m.searchFocus = false
+					m.input.Blur()
+					return m, nil
+				}
 				if m.cursor < len(m.filtered)-1 {
 					m.cursor++
 					m.resetDetailState()
@@ -298,11 +390,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 				m.ensureDetailCursorVisible()
 			} else {
-				// Scroll the column detail pane down while in list focus.
+				if m.searchFocus {
+					m.searchFocus = false
+					m.input.Blur()
+					return m, nil
+				}
 				if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 					cols := len(m.filtered[m.cursor].columns)
 					vis := m.visibleListRows()
-					maxDS := cols + 1 - vis // +1 for the header line
+					maxDS := cols + 1 - vis
 					if maxDS < 0 {
 						maxDS = 0
 					}
@@ -321,7 +417,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.detailCursor = 0
 				}
 				m.ensureDetailCursorVisible()
-			} else {
+			} else if !m.searchFocus {
 				vis := m.visibleListRows()
 				m.detailScroll -= vis / 2
 				if m.detailScroll < 0 {
@@ -340,9 +436,39 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 
+		case "r":
+			if !m.detailFocus && !m.searchFocus && len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+				e := m.filtered[m.cursor]
+				qn := e.qualifiedName()
+				if m.rowCounts == nil {
+					m.rowCounts = make(map[string]int64)
+				}
+				m.rowCounts[qn] = -1
+				return m, func() tea.Msg { return RowCountRequestMsg{QualifiedName: qn} }
+			}
+			// r in search mode goes to input.
+			if m.searchFocus {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				m.syncFiltered()
+				return m, cmd
+			}
+
+		case "a":
+			if !m.detailFocus && !m.searchFocus && len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+				m.actionOpen = true
+				return m, nil
+			}
+			if m.searchFocus {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				m.syncFiltered()
+				return m, cmd
+			}
+
 		default:
-			// Route typing to input only when in list focus.
-			if !m.detailFocus {
+			// Route typing to input only when search is active.
+			if m.searchFocus {
 				var cmd tea.Cmd
 				m.input, cmd = m.input.Update(msg)
 				prev := m.cursor
@@ -389,17 +515,28 @@ func (m Model) hasSelection() bool {
 	return false
 }
 
+func (m Model) limit() int {
+	if m.resultLimit > 0 {
+		return m.resultLimit
+	}
+	return 500
+}
+
 func (m Model) selectSQL(e tableEntry) string {
 	table := m.quotedTableName(e)
+	lim := m.limit()
 	switch m.driver {
 	case "mssql":
-		return fmt.Sprintf("SELECT TOP 500 *\nFROM %s", table)
+		return fmt.Sprintf("SELECT TOP %d *\nFROM %s", lim, table)
 	case "postgres":
-		return fmt.Sprintf("SELECT *\nFROM %s\nLIMIT 500", table)
+		return fmt.Sprintf("SELECT *\nFROM %s\nLIMIT %d", table, lim)
 	default: // sqlite and others
-		return fmt.Sprintf("SELECT *\nFROM %s\nLIMIT 500", table)
+		return fmt.Sprintf("SELECT *\nFROM %s\nLIMIT %d", table, lim)
 	}
 }
+
+// SetResultLimit sets the row limit for generated SELECT statements.
+func (m Model) SetResultLimit(n int) Model { m.resultLimit = n; return m }
 
 // buildSelectedSQL generates a SELECT for only the selected columns, adding
 // LEFT JOINs for any selected FK columns.
@@ -468,11 +605,12 @@ func (m Model) buildSelectedSQL(e tableEntry) string {
 	colList := strings.Join(colParts, ",\n")
 	from := strings.Join(fromParts, "\n")
 
+	lim := m.limit()
 	switch m.driver {
 	case "mssql":
-		return fmt.Sprintf("SELECT TOP 500\n%s\nFROM %s", colList, from)
+		return fmt.Sprintf("SELECT TOP %d\n%s\nFROM %s", lim, colList, from)
 	default:
-		return fmt.Sprintf("SELECT\n%s\nFROM %s\nLIMIT 500", colList, from)
+		return fmt.Sprintf("SELECT\n%s\nFROM %s\nLIMIT %d", colList, from, lim)
 	}
 }
 
@@ -542,7 +680,18 @@ func (m Model) View() string {
 	}
 	rightW := innerW - leftW - 1 // 1 for the divider char
 
-	filterRow := m.input.View()
+	var filterRow string
+	if m.searchFocus {
+		filterRow = m.input.View()
+	} else {
+		// Dim the search bar when the list (or detail) is active.
+		filterVal := m.input.Value()
+		if filterVal == "" {
+			filterRow = metaStyle.Render("> Filter tables…")
+		} else {
+			filterRow = metaStyle.Render("> " + filterVal + "  (/ to edit)")
+		}
+	}
 	leftLines := m.renderTableList(leftW)
 	rightLines := m.renderDetail(rightW, m.visibleListRows())
 
@@ -580,8 +729,10 @@ func (m Model) View() string {
 		} else {
 			footer = metaStyle.Render("↑↓ navigate  Space: select col / FK adds JOIN  Tab: back  Enter: SELECT *  Esc: back")
 		}
+	} else if m.searchFocus {
+		footer = metaStyle.Render("Type to filter  ↓/Enter: go to list  Esc: close")
 	} else {
-		footer = metaStyle.Render("↑↓ navigate  Tab: select columns  PgDn/PgUp: scroll cols  Enter: SELECT *  Esc: close")
+		footer = metaStyle.Render("↑↓/jk navigate  Tab: select cols  a: actions  r: row count  Enter: SELECT  /: search  Esc: back")
 	}
 
 	inner := titleStyle.Render("Schema") + "\n" +
@@ -593,7 +744,107 @@ func (m Model) View() string {
 
 	// outerStyle has Padding(0,1) which subtracts 2 from Width for the content area.
 	// Pass m.width-2 so that content area = (m.width-2)-2 = m.width-4 = innerW.
-	return outerStyle.Width(m.width - 2).Render(inner)
+	base := outerStyle.Width(m.width - 2).Render(inner)
+	if m.actionOpen && len(m.filtered) > 0 && m.cursor < len(m.filtered) {
+		overlay := m.renderActionMenu(innerW)
+		return lipgloss.Place(m.width, lipgloss.Height(base), lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "))
+	}
+	return base
+}
+
+// handleActionMenu processes key input while the 'a' action overlay is open.
+func (m Model) handleActionMenu(msg tea.KeyMsg) (Model, tea.Cmd) {
+	e := m.filtered[m.cursor]
+	qn := e.qualifiedName()
+	quotedQN := m.quoteQualifiedName(qn)
+	switch msg.String() {
+	case "esc", "ctrl+c", "a":
+		m.actionOpen = false
+		return m, nil
+	case "c":
+		m.actionOpen = false
+		name := qn
+		return m.Close(), func() tea.Msg { return CopyTableNameMsg{Name: name} }
+	case "q":
+		m.actionOpen = false
+		sql := "SELECT COUNT(*) AS [Count]\nFROM " + quotedQN
+		return m.Close(), func() tea.Msg { return TableSelectedMsg{SQL: sql} }
+	case "d":
+		m.actionOpen = false
+		sql := m.ddlSQL(e)
+		return m.Close(), func() tea.Msg { return TableSelectedMsg{SQL: sql} }
+	case "i":
+		m.actionOpen = false
+		sql := m.indexSQL(e)
+		return m.Close(), func() tea.Msg { return TableSelectedMsg{SQL: sql} }
+	}
+	return m, nil
+}
+
+// ddlSQL returns a driver-appropriate query to retrieve the DDL for a table.
+func (m Model) ddlSQL(e tableEntry) string {
+	qn := e.qualifiedName()
+	switch m.driver {
+	case "mssql":
+		return "EXEC sp_helptext '" + qn + "'"
+	case "postgres":
+		schema := e.schemaName
+		if schema == "" {
+			schema = "public"
+		}
+		return fmt.Sprintf(
+			"SELECT pg_get_tabledef('%s', '%s', false)", schema, e.tableName)
+	default: // sqlite
+		return fmt.Sprintf(
+			"SELECT sql FROM sqlite_master WHERE name = '%s'", e.tableName)
+	}
+}
+
+// indexSQL returns a driver-appropriate query to retrieve indexes for a table.
+func (m Model) indexSQL(e tableEntry) string {
+	qn := e.qualifiedName()
+	switch m.driver {
+	case "mssql":
+		return "EXEC sp_helpindex '" + qn + "'"
+	case "postgres":
+		schema := e.schemaName
+		if schema == "" {
+			schema = "public"
+		}
+		return fmt.Sprintf(
+			"SELECT indexname, indexdef\nFROM pg_indexes\nWHERE schemaname = '%s' AND tablename = '%s'\nORDER BY indexname",
+			schema, e.tableName)
+	default: // sqlite
+		return fmt.Sprintf("PRAGMA index_list('%s')", e.tableName)
+	}
+}
+
+// renderActionMenu renders the action overlay that appears when 'a' is pressed.
+func (m Model) renderActionMenu(w int) string {
+	actionStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#007acc")).
+		Padding(0, 2)
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#dcdcaa")).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#d4d4d4"))
+
+	e := m.filtered[m.cursor]
+	title := titleStyle.Render("Actions: " + e.qualifiedName())
+	row := func(key, label string) string {
+		return keyStyle.Render("["+key+"]") + " " + labelStyle.Render(label)
+	}
+	body := strings.Join([]string{
+		title,
+		"",
+		row("c", "Copy table name to clipboard"),
+		row("q", "Run SELECT COUNT(*)"),
+		row("d", "Show DDL"),
+		row("i", "Show indexes"),
+		"",
+		metaStyle.Render("Esc: close"),
+	}, "\n")
+	return actionStyle.Render(body)
 }
 
 func (m Model) renderTableList(w int) []string {
@@ -608,18 +859,33 @@ func (m Model) renderTableList(w int) []string {
 	for i, e := range visible {
 		absIdx := m.scroll + i
 		label := e.qualifiedName()
-		// Truncate to fit: 1 leading space + label must fit in w chars.
-		if len([]rune(label)) > w-1 {
+		// Build optional row-count suffix.
+		countSuffix := ""
+		if cnt, ok := m.rowCounts[label]; ok {
+			if cnt < 0 {
+				countSuffix = " …"
+			} else {
+				countSuffix = " " + formatRowCount(cnt)
+			}
+		}
+		// Truncate label to fit: 1 leading space + label + countSuffix must fit in w chars.
+		maxLabel := w - 1 - len([]rune(countSuffix))
+		if maxLabel < 1 {
+			maxLabel = 1
+		}
+		if len([]rune(label)) > maxLabel {
 			runes := []rune(label)
-			label = string(runes[:w-2]) + "…"
+			label = string(runes[:maxLabel-1]) + "…"
 		}
 		// Always use Width(w) so every item is exactly w terminal columns wide.
 		if absIdx == m.cursor {
-			lines = append(lines, selectedStyle.Width(w).Render(" "+label))
+			lines = append(lines, selectedStyle.Width(w).Render(" "+label+countSuffix))
 		} else if e.isView {
-			lines = append(lines, viewStyle.Width(w).Render(" "+label))
+			suffix := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(countSuffix)
+			lines = append(lines, viewStyle.Width(w).Render(" "+label+suffix))
 		} else {
-			lines = append(lines, tableStyle.Width(w).Render(" "+label))
+			suffix := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(countSuffix)
+			lines = append(lines, tableStyle.Width(w).Render(" "+label+suffix))
 		}
 	}
 
@@ -627,6 +893,20 @@ func (m Model) renderTableList(w int) []string {
 		lines = append(lines, metaStyle.Width(w).Render(" (no matches)"))
 	}
 	return lines
+}
+
+// formatRowCount formats an int64 row count with comma separators (e.g. 1234567 → "1,234,567").
+func formatRowCount(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	out := make([]byte, 0, len(s)+len(s)/3)
+	offset := len(s) % 3
+	for i, c := range []byte(s) {
+		if i > 0 && (i-offset)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 func (m Model) renderDetail(w, visH int) []string {
@@ -737,6 +1017,39 @@ func (m Model) Init() tea.Cmd { return nil }
 // Focus/Blur are kept for interface compatibility but the popup doesn't use them.
 func (m Model) Focus() Model { return m }
 func (m Model) Blur() Model  { return m }
+
+// SchemaJSON returns a JSON array summarising the loaded schema for MCP consumers.
+// If search is non-empty, only tables whose name contains search (case-insensitive) are included.
+// The result is capped at ~40 KB to avoid exceeding MCP response size limits.
+func (m Model) SchemaJSON(search string) string {
+	search = strings.ToLower(search)
+	const maxBytes = 40 * 1024
+	var sb strings.Builder
+	sb.WriteByte('[')
+	first := true
+	for _, e := range m.entries {
+		if search != "" && !strings.Contains(strings.ToLower(e.tableName), search) {
+			continue
+		}
+		if sb.Len() > maxBytes {
+			break
+		}
+		if !first {
+			sb.WriteByte(',')
+		}
+		first = false
+		sb.WriteString(fmt.Sprintf(`{"schema":%q,"name":%q,"columns":[`, e.schemaName, e.tableName))
+		for j, c := range e.columns {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(fmt.Sprintf(`{"name":%q,"type":%q}`, c.Name, c.Type))
+		}
+		sb.WriteString("]}")
+	}
+	sb.WriteByte(']')
+	return sb.String()
+}
 
 // padTo right-pads plain text s to exactly n runes (truncating if needed).
 // Safe to pass to lipgloss Render() since it contains no ANSI codes.

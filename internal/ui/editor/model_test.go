@@ -63,6 +63,40 @@ func TestDetectBlockRangeOnBlankLineHasNoActiveBlock(t *testing.T) {
 	}
 }
 
+func TestDetectBlockRangeUnionAll(t *testing.T) {
+	// UNION ALL query written with blank lines around the operator — the whole
+	// thing should be treated as one block regardless of cursor position.
+	text := "SELECT a, b\nFROM t1\nWHERE a = 1\n\nUNION ALL\n\nSELECT a, b\nFROM t2\nWHERE a = 2"
+	// line indices: 0=SELECT, 1=FROM, 2=WHERE, 3=blank, 4=UNION ALL, 5=blank, 6=SELECT, 7=FROM, 8=WHERE
+
+	for _, cursorLine := range []int{0, 1, 2, 4, 6, 7, 8} {
+		start, end, ok := detectBlockRange(text, cursorLine)
+		if !ok || start != 0 || end != 8 {
+			t.Errorf("cursor=%d: detectBlockRange()=(%d,%d,%v), want (0,8,true)", cursorLine, start, end, ok)
+		}
+	}
+
+	// Cursor on blank lines should also pick up the whole block (snapping to adjacent content).
+	// Line 3 (blank between WHERE and UNION ALL) snaps to line 2, then forward scan crosses UNION ALL.
+	start, end, ok := detectBlockRange(text, 3)
+	if !ok || start != 0 || end != 8 {
+		t.Errorf("cursor=3 (blank before UNION ALL): detectBlockRange()=(%d,%d,%v), want (0,8,true)", start, end, ok)
+	}
+}
+
+func TestDetectBlockRangeUnionSeparateFromOtherQueries(t *testing.T) {
+	// Two independent queries; the second is a UNION ALL.  Cursor in first query
+	// should not extend into the UNION ALL block.
+	text := "SELECT 1\n\nSELECT a\nFROM t1\n\nUNION ALL\n\nSELECT b\nFROM t2"
+	// line 0: SELECT 1  (standalone)
+	// line 1: blank
+	// lines 2-8: UNION ALL query
+	start, end, ok := detectBlockRange(text, 0)
+	if !ok || start != 0 || end != 0 {
+		t.Errorf("cursor=0 (standalone query): detectBlockRange()=(%d,%d,%v), want (0,0,true)", start, end, ok)
+	}
+}
+
 func TestUpdateCtrlROpensRefactorPopup(t *testing.T) {
 	m := New(testConfig())
 	m = m.SetSize(80, 8)
@@ -1405,6 +1439,61 @@ func TestActiveBlockLineSkipsBlankLines(t *testing.T) {
 	}
 	if !isActiveBlockLine(lines, 2, 0, 2, true, 2) {
 		t.Fatalf("expected trailing non-blank line to be active")
+	}
+}
+
+func TestDetectBlockRangeAndHighlightUnionAll(t *testing.T) {
+	// UNION ALL query with blank lines around the operator.
+	// All cursor positions inside the query should resolve to the full range (0..8),
+	// and isActiveBlockLine should mark every non-blank line as active.
+	text := "SELECT a, b\nFROM t1\nWHERE a = 1\n\nUNION ALL\n\nSELECT a, b\nFROM t2\nWHERE a = 2"
+	lines := strings.Split(text, "\n")
+	// line 0: SELECT a, b
+	// line 1: FROM t1
+	// line 2: WHERE a = 1
+	// line 3: (blank)
+	// line 4: UNION ALL
+	// line 5: (blank)
+	// line 6: SELECT a, b
+	// line 7: FROM t2
+	// line 8: WHERE a = 2
+
+	nonBlankLines := []int{0, 1, 2, 4, 6, 7, 8}
+	blankLines := []int{3, 5}
+
+	for _, cursorLine := range nonBlankLines {
+		start, end, ok := detectBlockRange(text, cursorLine)
+		if !ok || start != 0 || end != 8 {
+			t.Errorf("cursor=%d: detectBlockRange()=(%d,%d,%v), want (0,8,true)", cursorLine, start, end, ok)
+			continue
+		}
+		// Every non-blank line in range should be highlighted.
+		for _, row := range nonBlankLines {
+			if !isActiveBlockLine(lines, row, start, end, ok, cursorLine) {
+				t.Errorf("cursor=%d row=%d: expected active block line", cursorLine, row)
+			}
+		}
+		// Blank separator lines within the range should NOT be highlighted.
+		for _, row := range blankLines {
+			if isActiveBlockLine(lines, row, start, end, ok, cursorLine) {
+				t.Errorf("cursor=%d row=%d: blank line should not be active", cursorLine, row)
+			}
+		}
+	}
+}
+
+func TestDetectBlockRangeUnionIntersectExcept(t *testing.T) {
+	// All three set operators should bridge blank-line gaps.
+	operators := []string{"UNION", "UNION ALL", "INTERSECT", "INTERSECT ALL", "EXCEPT", "EXCEPT ALL"}
+	for _, op := range operators {
+		text := "SELECT 1\n\n" + op + "\n\nSELECT 2"
+		// line 0: SELECT 1, line 1: blank, line 2: op, line 3: blank, line 4: SELECT 2
+		for _, cursorLine := range []int{0, 4} {
+			start, end, ok := detectBlockRange(text, cursorLine)
+			if !ok || start != 0 || end != 4 {
+				t.Errorf("op=%q cursor=%d: detectBlockRange()=(%d,%d,%v), want (0,4,true)", op, cursorLine, start, end, ok)
+			}
+		}
 	}
 }
 

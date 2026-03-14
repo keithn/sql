@@ -294,6 +294,29 @@ func (b *Buffer) OpenLineAbove() {
 	b.col = 0
 }
 
+// ReplaceChars replaces count characters starting at the cursor with r.
+// If there are fewer than count characters remaining on the line, only the
+// available characters are replaced. Cursor stays at the last replaced char.
+func (b *Buffer) ReplaceChars(r rune, count int) {
+	row, col := b.row, b.col
+	line := b.lines[row]
+	if len(line) == 0 || col >= len(line) {
+		return
+	}
+	end := col + count
+	if end > len(line) {
+		end = len(line)
+	}
+	newLine := make([]rune, len(line))
+	copy(newLine, line)
+	for i := col; i < end; i++ {
+		newLine[i] = r
+	}
+	b.lines[row] = newLine
+	b.col = end - 1
+	b.clamp()
+}
+
 // DeleteCharUnder deletes the character under the cursor (x).
 func (b *Buffer) DeleteCharUnder() {
 	row, col := b.row, b.col

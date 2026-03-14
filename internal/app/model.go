@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sqltui/sql/internal/config"
 	"github.com/sqltui/sql/internal/db"
+	"github.com/sqltui/sql/internal/mcp"
 	"github.com/sqltui/sql/internal/ui/editor"
 	"github.com/sqltui/sql/internal/ui/cellview"
 	uihelp "github.com/sqltui/sql/internal/ui/help"
@@ -45,12 +46,27 @@ type Model struct {
 
 	activeConn        string
 	session           *db.Session
+	reconnectStr      string // nameOrDSN used for last successful connect (for auto-reconnect)
+	reconnecting      bool   // true while a background reconnect is in progress
 	pendingConnect    string
 	pendingBuffer     string
 	pendingBufferTx   bool
 	exportToClipboard    bool   // true = copy to clipboard (default), false = write to file
 	screenshotToClipboard bool  // F10 destination: true = clipboard (default), false = file; toggles each press
 	lastSQL              string // most recently executed SQL, used for export table name inference
+	snippetSaveOpen  bool   // true when the "save snippet name" prompt is visible
+	snippetSaveInput []rune // current input for snippet name
+	snippetSaveSQL   string // SQL body being saved
+
+	cellEditOpen   bool   // true when the inline cell value editor is active
+	cellEditInput  []rune // current input buffer
+	cellEditCursor int    // cursor position in cellEditInput
+
+	mcpQueryReply chan<- mcp.Reply // pending MCP execute_query reply channel; nil if none
+	pollSecs             int    // active poll interval in seconds (0 = off)
+	resultsFullscreen    bool   // true when results pane is expanded to fill the whole window
+	mcpMode              bool   // true when the MCP server is running
+	mcpAddr              string // address the MCP server is listening on
 
 	ws    *workspace.Workspace
 	wsDir string // connDir for the active connection
@@ -69,7 +85,7 @@ func New(cfg *config.Config, connectTo string) Model {
 		results:     results.New(),
 		help:        uihelp.New(),
 		palette:     palette.New(),
-		schema:      schema.New(),
+		schema:      schema.New().SetResultLimit(cfg.Editor.ResultLimit),
 		statusbar:   statusbar.New(),
 		modal:       modal.New(),
 		ws:          ws,
@@ -92,6 +108,20 @@ func New(cfg *config.Config, connectTo string) Model {
 	} else if last, err := ws.LoadLastConnection(); err == nil {
 		m.pendingConnect = last
 	}
+	return m
+}
+
+// SetMCPMode marks the app as running with an active MCP server, which shows
+// a status bar indicator.
+func (m Model) SetMCPMode(on bool) Model {
+	m.mcpMode = on
+	m.statusbar = m.statusbar.SetMCPMode(on)
+	return m
+}
+
+// SetMCPAddr stores the listening address for display in the help overlay.
+func (m Model) SetMCPAddr(addr string) Model {
+	m.mcpAddr = addr
 	return m
 }
 

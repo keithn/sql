@@ -17,6 +17,7 @@ import (
 	"github.com/sqltui/sql/internal/connections"
 	"github.com/sqltui/sql/internal/db"
 	"github.com/sqltui/sql/internal/export"
+	"github.com/sqltui/sql/internal/mcp"
 	"github.com/sqltui/sql/internal/screenshot"
 	"github.com/sqltui/sql/internal/ui/cellview"
 	"github.com/sqltui/sql/internal/ui/editor"
@@ -44,6 +45,8 @@ const (
 	commandPaletteExplainBuffer      = "command.explain_buffer"
 	commandPaletteExecuteBlockTx     = "command.execute_block_transaction"
 	commandPaletteExecuteBufferTx    = "command.execute_buffer_transaction"
+	commandPaletteSaveSnippet        = "command.save_snippet"
+	commandPaletteBrowseSnippets     = "command.browse_snippets"
 	confirmRunFullBuffer             = "confirm.run_full_buffer"
 	confirmRunFullBufferTx           = "confirm.run_full_buffer_transaction"
 
@@ -111,9 +114,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cellView, cmd = m.cellView.Update(msg)
 			return m, cmd
 		}
-		// When the results filter bar is open, bypass global key shortcuts so
-		// typed characters reach the filter input unmolested.
-		if m.results.FilterOpen() {
+		// When the snippet save prompt is open, handle it exclusively.
+		if m.snippetSaveOpen {
+			return m.handleSnippetSaveKey(msg)
+		}
+		// When the cell edit prompt is open, handle it exclusively.
+		if m.cellEditOpen {
+			return m.handleCellEditKey(msg)
+		}
+		// When the results filter, poll, limit bar, or row detail is open, bypass global key shortcuts.
+		if m.results.FilterOpen() || m.results.PollOpen() || m.results.LimitOpen() || m.results.RowDetailOpen() {
+			return m.routeToFocused(msg)
+		}
+		// When the editor goto-line or rename bar is open, bypass global key shortcuts.
+		if m.editor.GotoOpen() || m.editor.RenameTabOpen() {
 			return m.routeToFocused(msg)
 		}
 		return m.handleGlobalKey(msg)
@@ -138,6 +152,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ConnectedMsg:
 		m.session = msg.Session
 		m.activeConn = msg.WorkspaceKey
+		m.reconnectStr = msg.ConnectStr
+		m.reconnecting = false
 		m.statusbar = m.statusbar.SetConnection(msg.DisplayName)
 		m.statusbar = m.statusbar.SetTx(msg.Session != nil && msg.Session.InTransaction())
 		m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
@@ -168,9 +184,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleHistoryPaletteSelection(msg.Key)
 		case palette.KindExport:
 			return m.handleExportSelection(msg.Key)
+		case palette.KindSnippets:
+			return m.handleSnippetPaste(msg.Key)
 		default:
 			return m, nil
 		}
+
+	case palette.DeleteMsg:
+		// Delete snippet by key (which is the numeric ID as a string).
+		return m.handleSnippetDelete(msg.Key)
 
 	case palette.CancelledMsg:
 		m = m.closePalette()
@@ -232,6 +254,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.schema = m.schema.SetSchema(msg.Schema, msg.ConnName, msg.DriverName)
 		m.editor = m.editor.SetSchema(msg.Schema).SetSchemaCompletions(schemaCompletions(msg.Schema))
 		return m, nil
+
+	case schema.RowCountRequestMsg:
+		if m.session == nil {
+			return m, nil
+		}
+		sess := m.session
+		qn := msg.QualifiedName
+		driver := sess.DriverName
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			var query string
+			switch driver {
+			case "mssql":
+				// Use fast approximate from partition stats when possible.
+				query = fmt.Sprintf(
+					"SELECT SUM(p.rows) FROM sys.partitions p INNER JOIN sys.tables t ON p.object_id = t.object_id "+
+						"INNER JOIN sys.schemas s ON t.schema_id = s.schema_id "+
+						"WHERE p.index_id IN (0,1) AND s.name + '.' + t.name = '%s'",
+					strings.ReplaceAll(qn, "'", "''"),
+				)
+			default:
+				query = fmt.Sprintf("SELECT COUNT(*) FROM %s", qn)
+			}
+			results, err := sess.Execute(ctx, query)
+			if err != nil {
+				return schema.RowCountResultMsg{QualifiedName: qn, Err: err}
+			}
+			if len(results) == 0 || len(results[0].Rows) == 0 || len(results[0].Rows[0]) == 0 {
+				return schema.RowCountResultMsg{QualifiedName: qn, Count: 0}
+			}
+			cell := results[0].Rows[0][0]
+			var count int64
+			switch v := cell.(type) {
+			case int64:
+				count = v
+			case int32:
+				count = int64(v)
+			case int:
+				count = int64(v)
+			case float64:
+				count = int64(v)
+			default:
+				count = 0
+			}
+			return schema.RowCountResultMsg{QualifiedName: qn, Count: count}
+		}
+
+	case schema.RowCountResultMsg:
+		var cmd tea.Cmd
+		m.schema, cmd = m.schema.Update(msg)
+		return m, cmd
 
 	case schema.TableSelectedMsg:
 		var focusCmd tea.Cmd
@@ -338,6 +411,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar = m.statusbar.SetError("")
 		m.statusbar = m.statusbar.SetTx(m.session != nil && m.session.InTransaction())
 		m.statusbar = m.statusbar.SetRows(totalResultRows(msg.Results)).SetDuration(resultDurationMs(msg.Results))
+		if m.focused == PaneResults {
+			m.statusbar = m.statusbar.SetColType(m.results.CurrentColumnType())
+		}
+		// Notify any pending MCP execute_query.
+		if m.mcpQueryReply != nil {
+			m.mcpQueryReply <- mcp.Reply{Result: mcpResultsJSON(msg.Results)}
+			m.mcpQueryReply = nil
+		}
 		return m, nil
 
 	case QueryErrorMsg:
@@ -345,6 +426,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusbar = m.statusbar.SetError(msg.Err.Error())
 		m.statusbar = m.statusbar.SetTx(m.session != nil && m.session.InTransaction())
 		m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
+		// Notify any pending MCP execute_query.
+		if m.mcpQueryReply != nil {
+			m.mcpQueryReply <- mcp.Reply{Err: msg.Err.Error()}
+			m.mcpQueryReply = nil
+		}
+		return m, nil
+
+	case mcp.RequestMsg:
+		return m.handleMCPRequest(msg)
+
+	case ReconnectAndRetryMsg:
+		if m.reconnectStr == "" {
+			m.statusbar = m.statusbar.SetError("connection lost (no reconnect info)")
+			return m, nil
+		}
+		m.reconnecting = true
+		m.statusbar = m.statusbar.SetError("Reconnecting…")
+		return m, reconnectAndExecuteCmd(m.cfg, m.reconnectStr, msg.SQL)
+
+	case ReconnectDoneMsg:
+		m.reconnecting = false
+		m.session = msg.Session
+		m.reconnectStr = msg.ConnectStr
+		m.statusbar = m.statusbar.SetError("")
+		m.statusbar = m.statusbar.SetConnection(msg.Session.Name)
+		m.results = m.results.SetResults(msg.Results)
+		m.statusbar = m.statusbar.SetRows(totalResultRows(msg.Results)).SetDuration(resultDurationMs(msg.Results))
+		if m.focused == PaneResults {
+			m.statusbar = m.statusbar.SetColType(m.results.CurrentColumnType())
+		}
+		return m, nil
+
+	case ReconnectErrMsg:
+		m.reconnecting = false
+		m.results = m.results.SetError(msg.Err.Error())
+		m.statusbar = m.statusbar.SetError("Reconnect failed: " + msg.Err.Error())
 		return m, nil
 
 	case results.CellYankMsg:
@@ -355,9 +472,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case schema.CopyTableNameMsg:
+		if err := writeClipboard(msg.Name); err != nil {
+			m.statusbar = m.statusbar.SetError("copy: " + err.Error())
+		} else {
+			m.statusbar = m.statusbar.SetError("copied: " + msg.Name)
+		}
+		return m, nil
+
 	case results.FilterConfirmedMsg:
 		_ = saveFilterHistory(m.results.FilterHistory())
 		return m, nil
+
+	case results.StartPollMsg:
+		m.pollSecs = msg.Seconds
+		m.results = m.results.SetPollSecs(m.pollSecs)
+		if m.pollSecs > 0 {
+			return m, pollTickCmd(m.pollSecs)
+		}
+		return m, nil
+
+	case results.StartLimitMsg:
+		lim := msg.Limit
+		if lim <= 0 {
+			lim = m.cfg.Editor.ResultLimit
+		}
+		m.schema = m.schema.SetResultLimit(lim)
+		return m, nil
+
+	case PollTickMsg:
+		if m.pollSecs <= 0 || m.lastSQL == "" || m.session == nil {
+			return m, nil
+		}
+		m.results = m.results.SetLoading(true)
+		m.statusbar = m.statusbar.SetError("")
+		m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
+		return m, tea.Batch(executeCmd(m.session, m.lastSQL), pollTickCmd(m.pollSecs))
 
 	case cellview.CloseMsg:
 		m.cellView = m.cellView.Close()
@@ -399,9 +549,14 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+h":
 		return m.openHistoryPalette()
 
-	case "e":
+	case "E":
 		if m.focused == PaneResults {
 			return m.openExportPalette()
+		}
+
+	case "e":
+		if m.focused == PaneResults {
+			return m.openCellEdit()
 		}
 
 	case "v":
@@ -423,17 +578,36 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, executeCmd(m.session, m.lastSQL)
 		}
 
+	case "P":
+		if m.focused == PaneResults {
+			m.results = m.results.OpenPoll()
+			return m, nil
+		}
+
+	case "x":
+		if m.focused == PaneResults && m.pollSecs > 0 {
+			m.pollSecs = 0
+			m.results = m.results.SetPollSecs(0)
+			return m, nil
+		}
+
 	// Open schema browser popup.
 	case "ctrl+b", "f2":
 		return m.openSchemaBrowser()
 
 	// Focus editor.
 	case "f3", "alt+1":
+		m.resultsFullscreen = false
 		return m.focusPane(PaneEditor)
 
 	// Focus results.
 	case "f4", "alt+2":
 		return m.focusPane(PaneResults)
+
+	// Toggle results fullscreen.
+	case "ctrl+l":
+		m.resultsFullscreen = !m.resultsFullscreen
+		return m.applySize()
 
 	// Toggle vim mode.
 	case "alt+v", "ctrl+alt+v":
@@ -524,6 +698,10 @@ func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 		Summary: "Create a new query tab/workspace file",
 		Search:  "tab query new",
 	}}
+	items = append(items,
+		palette.Item{Key: commandPaletteSaveSnippet, Title: "Save current block as snippet", Badge: "✂", Summary: "Save the active SQL block as a named snippet for later reuse", Search: "snippet save block named"},
+		palette.Item{Key: commandPaletteBrowseSnippets, Title: "Browse snippets", Badge: "✂", Summary: "Open snippet browser — fuzzy filter, Enter pastes, d deletes", Search: "snippet browse paste"},
+	)
 	if m.session != nil {
 		items = append(items,
 			palette.Item{Key: commandPaletteExplainBlock, Title: "Explain current block", Badge: "PLAN", Summary: "Show an estimated plan for the logical SQL block under the cursor", Search: "explain plan block current estimated"},
@@ -581,6 +759,10 @@ func (m Model) handleCommandPaletteSelection(key string) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return ExecuteBlockInTransactionMsg{} }
 	case commandPaletteExecuteBufferTx:
 		return m, func() tea.Msg { return ExecuteBufferInTransactionMsg{} }
+	case commandPaletteSaveSnippet:
+		return m.openSnippetSave()
+	case commandPaletteBrowseSnippets:
+		return m.openSnippetBrowser()
 	default:
 		return m, nil
 	}
@@ -673,6 +855,396 @@ func (m Model) handleHistoryPaletteSelection(sqlText string) (tea.Model, tea.Cmd
 	return m, tea.Batch(focusCmd, insertCmd)
 }
 
+// openSnippetSave opens the inline name-prompt for saving a snippet.
+func (m Model) openSnippetSave() (tea.Model, tea.Cmd) {
+	sql := strings.TrimSpace(m.editor.CurrentBlock())
+	if sql == "" {
+		m.statusbar = m.statusbar.SetError("nothing to save (cursor not inside a query block)")
+		return m, nil
+	}
+	m.snippetSaveOpen = true
+	m.snippetSaveInput = nil
+	m.snippetSaveSQL = sql
+	m.statusbar = m.statusbar.SetError("Snippet name: ")
+	return m, nil
+}
+
+// handleSnippetSaveKey processes keystrokes while the snippet name prompt is open.
+func (m Model) handleSnippetSaveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.snippetSaveOpen = false
+		m.snippetSaveInput = nil
+		m.snippetSaveSQL = ""
+		m.statusbar = m.statusbar.SetError("")
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(string(m.snippetSaveInput))
+		if name == "" || strings.ContainsAny(name, "/\\") {
+			m.statusbar = m.statusbar.SetError("invalid name (empty or contains / \\)")
+			return m, nil
+		}
+		sql := m.snippetSaveSQL
+		m.snippetSaveOpen = false
+		m.snippetSaveInput = nil
+		m.snippetSaveSQL = ""
+		if m.ws != nil {
+			if err := m.ws.AddSnippet(name, sql); err != nil {
+				m.statusbar = m.statusbar.SetError("save snippet: " + err.Error())
+			} else {
+				m.statusbar = m.statusbar.SetError("snippet saved: " + name)
+			}
+		}
+		return m, nil
+	case "backspace", "ctrl+h":
+		if len(m.snippetSaveInput) > 0 {
+			m.snippetSaveInput = m.snippetSaveInput[:len(m.snippetSaveInput)-1]
+		}
+		m.statusbar = m.statusbar.SetError("Snippet name: " + string(m.snippetSaveInput))
+		return m, nil
+	default:
+		for _, r := range msg.String() {
+			m.snippetSaveInput = append(m.snippetSaveInput, r)
+		}
+		m.statusbar = m.statusbar.SetError("Snippet name: " + string(m.snippetSaveInput))
+		return m, nil
+	}
+}
+
+// openSnippetBrowser loads snippets and opens the snippet palette.
+func (m Model) openSnippetBrowser() (tea.Model, tea.Cmd) {
+	var items []palette.Item
+	if m.ws != nil {
+		if snippets, err := m.ws.ListSnippets(); err == nil {
+			for _, s := range snippets {
+				items = append(items, palette.Item{
+					Key:     fmt.Sprintf("%d", s.ID),
+					Title:   s.Name,
+					Summary: truncateSQL(s.SQL, 60),
+					Search:  s.Name + " " + s.SQL,
+				})
+			}
+		}
+	}
+	var cmd tea.Cmd
+	m.palette, cmd = m.palette.OpenSnippets(items)
+	m.statusbar = m.statusbar.SetPane("SNIPPETS")
+	m.statusbar = m.statusbar.SetError("")
+	return m, cmd
+}
+
+// handleSnippetPaste pastes the snippet SQL into the editor.
+func (m Model) handleSnippetPaste(key string) (tea.Model, tea.Cmd) {
+	if m.ws == nil {
+		return m, nil
+	}
+	snippets, err := m.ws.ListSnippets()
+	if err != nil {
+		m.statusbar = m.statusbar.SetError("load snippets: " + err.Error())
+		return m, nil
+	}
+	for _, s := range snippets {
+		if fmt.Sprintf("%d", s.ID) == key {
+			var focusCmd tea.Cmd
+			m, focusCmd = m.applyPaneFocus(PaneEditor)
+			var insertCmd tea.Cmd
+			m.editor, insertCmd = m.editor.InsertText(s.SQL)
+			return m, tea.Batch(focusCmd, insertCmd)
+		}
+	}
+	return m, nil
+}
+
+// handleSnippetDelete deletes a snippet by its string ID key.
+func (m Model) handleSnippetDelete(key string) (tea.Model, tea.Cmd) {
+	if m.ws == nil {
+		return m, nil
+	}
+	var id int64
+	if _, err := fmt.Sscan(key, &id); err != nil {
+		return m, nil
+	}
+	if err := m.ws.DeleteSnippet(id); err != nil {
+		m.statusbar = m.statusbar.SetError("delete snippet: " + err.Error())
+	} else {
+		m.statusbar = m.statusbar.SetError("snippet deleted")
+	}
+	return m, nil
+}
+
+// openCellEdit opens the inline cell edit prompt for the cursor cell.
+func (m Model) openCellEdit() (tea.Model, tea.Cmd) {
+	ctx, ok := m.results.CurrentCellContext()
+	if !ok {
+		m.statusbar = m.statusbar.SetError("no cell selected")
+		return m, nil
+	}
+	m.cellEditOpen = true
+	m.cellEditInput = []rune(ctx.Value)
+	m.cellEditCursor = len(m.cellEditInput)
+	m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, ctx.Value))
+	return m, nil
+}
+
+// handleCellEditKey processes keystrokes while the cell edit prompt is open.
+func (m Model) handleCellEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ctx, ok := m.results.CurrentCellContext()
+	if !ok {
+		m.cellEditOpen = false
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.cellEditOpen = false
+		m.cellEditInput = nil
+		m.statusbar = m.statusbar.SetError("")
+		return m, nil
+	case "enter":
+		newVal := string(m.cellEditInput)
+		m.cellEditOpen = false
+		m.cellEditInput = nil
+		updateSQL := generateUpdateSQL(ctx, newVal, m.lastSQL)
+		if updateSQL == "" {
+			m.statusbar = m.statusbar.SetError("cannot generate UPDATE: could not determine table or PK")
+			return m, nil
+		}
+		m.statusbar = m.statusbar.SetError("")
+		var focusCmd tea.Cmd
+		m, focusCmd = m.applyPaneFocus(PaneEditor)
+		var insertCmd tea.Cmd
+		m.editor, insertCmd = m.editor.InsertText(updateSQL)
+		return m, tea.Batch(focusCmd, insertCmd)
+	case "backspace", "ctrl+h":
+		if m.cellEditCursor > 0 && len(m.cellEditInput) > 0 {
+			m.cellEditInput = append(m.cellEditInput[:m.cellEditCursor-1], m.cellEditInput[m.cellEditCursor:]...)
+			m.cellEditCursor--
+		}
+		m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, string(m.cellEditInput)))
+		return m, nil
+	case "left":
+		if m.cellEditCursor > 0 {
+			m.cellEditCursor--
+		}
+		return m, nil
+	case "right":
+		if m.cellEditCursor < len(m.cellEditInput) {
+			m.cellEditCursor++
+		}
+		return m, nil
+	case "home", "ctrl+a":
+		m.cellEditCursor = 0
+		return m, nil
+	case "end", "ctrl+e":
+		m.cellEditCursor = len(m.cellEditInput)
+		return m, nil
+	default:
+		for _, r := range msg.String() {
+			m.cellEditInput = append(m.cellEditInput[:m.cellEditCursor], append([]rune{r}, m.cellEditInput[m.cellEditCursor:]...)...)
+			m.cellEditCursor++
+		}
+		m.statusbar = m.statusbar.SetError(fmt.Sprintf("Edit [%s]: %s", ctx.ColName, string(m.cellEditInput)))
+		return m, nil
+	}
+}
+
+// generateUpdateSQL produces an UPDATE statement for the given cell edit.
+func generateUpdateSQL(ctx results.CellContext, newVal, lastSQL string) string {
+	table := export.ExtractTableName(lastSQL)
+	if table == "" {
+		return ""
+	}
+	// Find the first likely PK column (named "id", or first column).
+	pkCol := -1
+	for i, col := range ctx.Columns {
+		name := strings.ToLower(col.Name)
+		if name == "id" {
+			pkCol = i
+			break
+		}
+	}
+	if pkCol < 0 && len(ctx.Columns) > 0 {
+		pkCol = 0
+	}
+	if pkCol < 0 || pkCol >= len(ctx.Row) {
+		return ""
+	}
+	pkVal := formatSQLLiteral(ctx.Row[pkCol])
+	pkName := ctx.Columns[pkCol].Name
+	return fmt.Sprintf("UPDATE %s\nSET %s = %s\nWHERE %s = %s",
+		table,
+		quoteIdent(ctx.ColName),
+		formatSQLLiteral(newVal),
+		quoteIdent(pkName),
+		pkVal,
+	)
+}
+
+func formatSQLLiteral(v any) string {
+	if v == nil {
+		return "NULL"
+	}
+	s := fmt.Sprintf("%v", v)
+	// If numeric, return as-is.
+	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
+		return s
+	}
+	// Escape single quotes.
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func quoteIdent(name string) string {
+	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
+}
+
+// truncateSQL returns a short single-line preview of a SQL string.
+func truncateSQL(sql string, maxLen int) string {
+	sql = strings.ReplaceAll(sql, "\n", " ")
+	sql = strings.ReplaceAll(sql, "\t", " ")
+	runes := []rune(sql)
+	if len(runes) <= maxLen {
+		return sql
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+// handleMCPRequest processes an MCP tool call from the background server goroutine.
+// All state access is safe here since we're inside the bubbletea Update function.
+func (m Model) handleMCPRequest(msg mcp.RequestMsg) (tea.Model, tea.Cmd) {
+	reply := func(result any, err string) (tea.Model, tea.Cmd) {
+		msg.ReplyCh <- mcp.Reply{Result: result, Err: err}
+		return m, nil
+	}
+
+	switch msg.Method {
+	case "read_editor":
+		return reply(m.editor.Value(), "")
+
+	case "write_editor":
+		sql, _ := msg.Params["sql"].(string)
+		mode, _ := msg.Params["mode"].(string)
+		if mode == "" {
+			mode = "new_tab"
+		}
+		var insertCmd tea.Cmd
+		switch mode {
+		case "new_tab":
+			connName := m.activeConn
+			if connName == "" {
+				connName = "_adhoc"
+			}
+			if m.ws != nil {
+				if path, err := m.ws.NewQueryFile(connName); err == nil {
+					m.editor = m.editor.AddTab(path, sql)
+				} else {
+					m.editor = m.editor.AddTab("", sql)
+				}
+			} else {
+				m.editor = m.editor.AddTab("", sql)
+			}
+		case "replace":
+			m.editor = m.editor.SetActiveTabContent(sql)
+		case "append", "insert":
+			m.editor, insertCmd = m.editor.InsertText(sql)
+		}
+		saveCmd := m.editor.SaveActiveTabCmd()
+		msg.ReplyCh <- mcp.Reply{Result: "ok"}
+		return m, tea.Batch(insertCmd, saveCmd)
+
+	case "list_tabs":
+		info := m.editor.TabsInfo()
+		names := make([]string, len(info))
+		for i, t := range info {
+			names[i] = t.Title
+		}
+		b, _ := json.Marshal(names)
+		return reply(string(b), "")
+
+	case "get_results":
+		rows := m.results.ActiveRows()
+		rs := m.results.ActiveResult()
+		if rs == nil {
+			return reply("[]", "")
+		}
+		return reply(mcpFormatResults(*rs, rows), "")
+
+	case "get_schema":
+		search, _ := msg.Params["search"].(string)
+		return reply(m.schema.SchemaJSON(search), "")
+
+	case "execute_query":
+		sql, _ := msg.Params["sql"].(string)
+		if strings.TrimSpace(sql) == "" {
+			return reply(nil, "sql parameter is required")
+		}
+		if m.session == nil {
+			return reply(nil, "not connected")
+		}
+		// Store reply channel — will be signalled by QueryDoneMsg/QueryErrorMsg.
+		m.mcpQueryReply = msg.ReplyCh
+		m.results = m.results.SetLoading(true)
+		return m, executeCmd(m.session, sql)
+
+	case "switch_tab":
+		name, _ := msg.Params["name"].(string)
+		for i, t := range m.editor.TabsInfo() {
+			if t.Title == name || t.Path == name {
+				m.editor = m.editor.SetActiveTab(i)
+				break
+			}
+		}
+		msg.ReplyCh <- mcp.Reply{Result: "ok"}
+		return m, nil
+
+	default:
+		return reply(nil, "unknown tool: "+msg.Method)
+	}
+}
+
+// mcpResultsJSON serialises query results for MCP replies.
+func mcpResultsJSON(sets []db.QueryResult) string {
+	if len(sets) == 0 {
+		return "[]"
+	}
+	rs := sets[0]
+	return mcpFormatResults(rs, rs.Rows)
+}
+
+// mcpFormatResults converts a QueryResult to a JSON string.
+const mcpMaxRows = 50
+const mcpMaxStrLen = 120
+
+func mcpFormatResults(rs db.QueryResult, rows [][]any) string {
+	type rowObj = map[string]any
+	truncated := len(rows) > mcpMaxRows
+	if truncated {
+		rows = rows[:mcpMaxRows]
+	}
+	out := make([]rowObj, 0, len(rows))
+	for _, row := range rows {
+		obj := make(rowObj, len(rs.Columns))
+		for i, col := range rs.Columns {
+			if i >= len(row) {
+				obj[col.Name] = nil
+				continue
+			}
+			v := row[i]
+			// Truncate long strings to keep context usage low.
+			if s, ok := v.(string); ok && len(s) > mcpMaxStrLen {
+				v = s[:mcpMaxStrLen] + "…"
+			}
+			obj[col.Name] = v
+		}
+		out = append(out, obj)
+	}
+	result := map[string]any{"rows": out}
+	if truncated {
+		result["truncated"] = true
+		result["note"] = fmt.Sprintf("showing first %d of %d rows", mcpMaxRows, len(rs.Rows))
+	}
+	b, _ := json.Marshal(result)
+	return string(b)
+}
+
 func (m Model) openCellView() (tea.Model, tea.Cmd) {
 	text, ok := m.results.CurrentCellRaw()
 	if !ok {
@@ -732,6 +1304,10 @@ func (m Model) handleExportSelection(key string) (tea.Model, tea.Cmd) {
 	if rs == nil {
 		m.statusbar = m.statusbar.SetError("no results to export")
 		return m, nil
+	}
+	// Use only tagged rows if any rows are tagged.
+	if tagged := m.results.TaggedResult(); tagged != nil {
+		rs = tagged
 	}
 
 	content, err := exportContent(key, *rs, m.lastSQL)
@@ -994,11 +1570,17 @@ func (m Model) applyPaneFocus(p FocusedPane) (Model, tea.Cmd) {
 		m.focused = PaneEditor
 		m.statusbar = m.statusbar.SetPane("EDITOR")
 		m.statusbar = m.statusbar.SetError("")
+		// Stop polling when the user moves to the editor.
+		if m.pollSecs > 0 {
+			m.pollSecs = 0
+			m.results = m.results.SetPollSecs(0)
+		}
 	case PaneResults:
 		m.editor = m.editor.Blur()
 		m.results = m.results.Focus()
 		m.focused = PaneResults
 		m.statusbar = m.statusbar.SetPane("RESULTS")
+		m.statusbar = m.statusbar.SetColType(m.results.CurrentColumnType())
 	case PaneSchema:
 		// Schema is now a popup; open the browser instead of switching layout pane
 		return m.applyPaneFocus(PaneEditor)
@@ -1019,8 +1601,10 @@ func (m Model) routeToFocused(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor, cmd = m.editor.Update(msg)
 		// Keep vim mode indicator in sync after every key.
 		m.statusbar = m.statusbar.SetVimMode(m.editor.VimMode())
+		m.statusbar = m.statusbar.SetColType("")
 	case PaneResults:
 		m.results, cmd = m.results.Update(msg)
+		m.statusbar = m.statusbar.SetColType(m.results.CurrentColumnType())
 	}
 	return m, cmd
 }
@@ -1091,6 +1675,10 @@ func (m Model) layoutMetrics() paneLayout {
 		available = 2
 	}
 
+	if m.resultsFullscreen {
+		return paneLayout{editorH: 0, resultsH: available, contentW: m.width}
+	}
+
 	editorH := (available * 6) / 10
 	if editorH < 2 {
 		editorH = 2
@@ -1142,7 +1730,7 @@ func connectCmd(cfg *config.Config, nameOrDSN string) tea.Cmd {
 			return ConnectErrMsg{Err: err}
 		}
 		session.Name = target.DisplayName
-		return ConnectedMsg{DisplayName: target.DisplayName, WorkspaceKey: target.WorkspaceKey, Session: session}
+		return ConnectedMsg{DisplayName: target.DisplayName, WorkspaceKey: target.WorkspaceKey, Session: session, ConnectStr: nameOrDSN}
 	}
 }
 
@@ -1196,14 +1784,89 @@ func restoreEditorTabs(ed editor.Model, ws *workspace.Workspace, connName, connD
 }
 
 // executeCmd returns a tea.Cmd that runs SQL and returns results.
+func pollTickCmd(secs int) tea.Cmd {
+	return tea.Tick(time.Duration(secs)*time.Second, func(time.Time) tea.Msg {
+		return PollTickMsg{}
+	})
+}
+
 func executeCmd(session *db.Session, sql string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		results, err := session.Execute(ctx, sql)
 		if err != nil {
+			if isDroppedConnection(err, session.DriverName) {
+				return ReconnectAndRetryMsg{SQL: sql}
+			}
 			return QueryErrorMsg{Err: err}
 		}
 		return QueryDoneMsg{Results: results}
+	}
+}
+
+// isDroppedConnection reports whether err looks like a lost DB connection.
+func isDroppedConnection(err error, driverName string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Common cross-driver signals.
+	for _, needle := range []string{
+		"connection reset",
+		"broken pipe",
+		"connection refused",
+		"eof",
+		"i/o timeout",
+		"use of closed network connection",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	// Driver-specific.
+	switch driverName {
+	case "mssql":
+		for _, needle := range []string{
+			"server closed the connection",
+			"connection was closed",
+			"connection has been lost",
+		} {
+			if strings.Contains(msg, needle) {
+				return true
+			}
+		}
+	case "postgres":
+		for _, needle := range []string{
+			"unexpected eof",
+			"server closed",
+		} {
+			if strings.Contains(msg, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reconnectAndExecuteCmd reconnects using connectStr and then retries sql.
+func reconnectAndExecuteCmd(cfg *config.Config, connectStr, sql string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		target, err := connections.Resolve(cfg, connectStr)
+		if err != nil {
+			return ReconnectErrMsg{Err: err}
+		}
+		session, err := db.Connect(ctx, target.Driver, target.DSN)
+		if err != nil {
+			return ReconnectErrMsg{Err: err}
+		}
+		session.Name = target.DisplayName
+		// Retry the original query.
+		results, err := session.Execute(ctx, sql)
+		if err != nil {
+			return ReconnectErrMsg{Err: fmt.Errorf("reconnected but query failed: %w", err)}
+		}
+		return ReconnectDoneMsg{Session: session, Results: results, ConnectStr: connectStr}
 	}
 }
 

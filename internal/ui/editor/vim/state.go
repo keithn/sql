@@ -36,6 +36,7 @@ type Snapshot struct {
 	Operator      rune
 	OperatorCount int
 	PendingG      bool
+	PendingR      bool
 }
 
 // State is the per-tab vim key-input state machine.
@@ -52,6 +53,9 @@ type State struct {
 
 	// Pending 'g' prefix.
 	pendingG bool
+
+	// Pending 'r' replace-char.
+	pendingR bool
 
 	// Visual mode anchor.
 	Anchor Pos
@@ -92,6 +96,7 @@ func (s *State) Snapshot() Snapshot {
 		Operator:      s.operator,
 		OperatorCount: s.operatorCount,
 		PendingG:      s.pendingG,
+		PendingR:      s.pendingR,
 	}
 }
 
@@ -115,6 +120,7 @@ func (s *State) RestoreSnapshot(snapshot Snapshot) {
 	s.operator = snapshot.Operator
 	s.operatorCount = snapshot.OperatorCount
 	s.pendingG = snapshot.PendingG
+	s.pendingR = snapshot.PendingR
 }
 
 // ModeString returns the mode label for the status bar.
@@ -200,6 +206,7 @@ func (s *State) resetMotion() {
 	s.operatorCount = 0
 	s.operator = 0
 	s.pendingG = false
+	s.pendingR = false
 }
 
 // ─── Normal mode ──────────────────────────────────────────────────────────────
@@ -222,6 +229,20 @@ func (s *State) handleNormal(key string) bool {
 			s.Buf.MoveFirstLine()
 		}
 		s.resetMotion()
+		return true
+	}
+
+	// Pending 'r' replace-char: next key is the replacement character.
+	if s.pendingR {
+		n := s.count()
+		s.resetMotion()
+		if key != "esc" && len([]rune(key)) == 1 {
+			r := []rune(key)[0]
+			if !isCtrl(r) {
+				s.Buf.PushUndo()
+				s.Buf.ReplaceChars(r, n)
+			}
+		}
 		return true
 	}
 
@@ -326,6 +347,10 @@ func (s *State) handleNormal(key string) bool {
 		s.resetMotion()
 
 	// ─── Editing ────────────────────────────────────────────────────────────
+	case "r":
+		s.pendingR = true
+		// Keep countStr so ReplaceChars uses it; don't resetMotion here.
+
 	case "x":
 		s.Buf.PushUndo()
 		for i := 0; i < n; i++ {

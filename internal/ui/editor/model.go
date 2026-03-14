@@ -130,6 +130,16 @@ type Model struct {
 	vimEnabled        bool
 	blinkID           int
 	blinkOn           bool
+
+	// Goto-line bar (Ctrl+G, or : in vim normal mode).
+	gotoOpen  bool
+	gotoInput []rune
+
+	// Tab rename bar (T in refactor popup).
+	renameTabOpen   bool
+	renameTabInput  []rune
+	renameTabCursor int
+	renameTabErr    string
 }
 
 // styles
@@ -246,6 +256,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m.insertPasteText(string(msg))
 
 	case tea.KeyMsg:
+		// When goto-line bar is open, route all keys to it.
+		if m.gotoOpen {
+			return m.updateGotoLine(msg)
+		}
+		// When rename tab bar is open, route all keys to it.
+		if m.renameTabOpen {
+			return m.updateRenameTab(msg)
+		}
+
 		// Intercept paste before anything else — read from OS clipboard
 		// directly so we never emulate typing and never trigger autocomplete.
 		// ctrl+v is intercepted here. shift+insert cannot be intercepted: the
@@ -331,6 +350,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return ExecuteBlockMsg{SQL: sql} }
 			case "ctrl+r":
 				return m.openRefactorPopup()
+			case "ctrl+g":
+				return m.openGotoLine()
 			case "f5":
 				sql := m.tabs[m.active].ta.Value()
 				return m, func() tea.Msg { return ExecuteBufferMsg{SQL: sql} }
@@ -436,6 +457,8 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "ctrl+pgup", "alt+h":
 		m.active = (m.active - 1 + len(m.tabs)) % len(m.tabs)
 		return m, m.refreshVimInsertCursorBlink()
+	case "ctrl+g":
+		return m.openGotoLine()
 	}
 
 	tab := &m.tabs[m.active]
@@ -484,6 +507,11 @@ func (m Model) updateVim(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if len(msg.String()) == 1 && !isWordRune(rune(msg.String()[0])) {
 			m.popup.visible = false
 		}
+	}
+
+	// In Normal mode, `:` opens the goto-line cmdline.
+	if tab.vim.Mode == vim.ModeNormal && msg.String() == ":" {
+		return m.openGotoLine()
 	}
 
 	oldVal := tab.vim.Buf.Value()
@@ -1154,6 +1182,23 @@ func (m Model) saveActiveTextareaCmd() tea.Cmd {
 	return saveTextToPathCmd(m.tabs[m.active].Path, m.tabs[m.active].ta.Value())
 }
 
+// SaveActiveTabCmd returns a Cmd that writes the active tab's content to disk.
+// Used by external callers (e.g. MCP handler) after programmatically setting content.
+func (m Model) SaveActiveTabCmd() tea.Cmd {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return nil
+	}
+	tab := m.tabs[m.active]
+	if tab.Path == "" {
+		return nil
+	}
+	val := tab.ta.Value()
+	if m.vimEnabled && tab.vim != nil {
+		val = tab.vim.Buf.Value()
+	}
+	return saveTextToPathCmd(tab.Path, val)
+}
+
 func saveTextToPathCmd(path, value string) tea.Cmd {
 	if path == "" {
 		return nil
@@ -1174,6 +1219,28 @@ func (m Model) View() string {
 		content = m.renderContent()
 	}
 	base := lipgloss.JoinVertical(lipgloss.Left, tabBar, content)
+
+	// Overlay goto-line bar at the bottom of the editor.
+	if m.gotoOpen {
+		bar := m.renderGotoLineBar()
+		lines := strings.Split(base, "\n")
+		if len(lines) > 0 {
+			lines[len(lines)-1] = bar
+			base = strings.Join(lines, "\n")
+		}
+		return base
+	}
+
+	// Overlay rename-tab bar at the bottom of the editor.
+	if m.renameTabOpen {
+		bar := m.renderRenameTabBar()
+		lines := strings.Split(base, "\n")
+		if len(lines) > 0 {
+			lines[len(lines)-1] = bar
+			base = strings.Join(lines, "\n")
+		}
+		return base
+	}
 
 	if !m.popup.visible || len(m.popup.items) == 0 {
 		return base
@@ -2357,6 +2424,18 @@ func (m Model) TabsInfo() []TabInfo {
 	return info
 }
 
+// SetActiveTabContent replaces the content of the currently active tab.
+func (m Model) SetActiveTabContent(sql string) Model {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return m
+	}
+	m.tabs[m.active].ta.SetValue(sql)
+	if m.vimEnabled && m.tabs[m.active].vim != nil {
+		m.tabs[m.active].vim.Buf.SetValue(sql)
+	}
+	return m
+}
+
 func cursorForTab(t Tab) (int, int) {
 	if t.vim != nil {
 		return t.vim.Buf.CursorRow(), t.vim.Buf.CursorCol()
@@ -2763,6 +2842,243 @@ func (m Model) renderRefactorPopup() string {
 	return popupStyle.Render(strings.Join(rows, "\n"))
 }
 
+// ─── Goto-line bar ────────────────────────────────────────────────────────────
+
+func (m Model) openGotoLine() (Model, tea.Cmd) {
+	m.gotoOpen = true
+	m.gotoInput = m.gotoInput[:0]
+	return m, nil
+}
+
+func (m Model) updateGotoLine(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		input := strings.TrimSpace(string(m.gotoInput))
+		m.gotoOpen = false
+		m.gotoInput = nil
+		if input == "" {
+			return m, nil
+		}
+		n, err := strconv.Atoi(input)
+		if err != nil || n < 1 {
+			return m, nil
+		}
+		return m.jumpToLine(n)
+	case "esc":
+		m.gotoOpen = false
+		m.gotoInput = nil
+		return m, nil
+	case "backspace":
+		if len(m.gotoInput) > 0 {
+			m.gotoInput = m.gotoInput[:len(m.gotoInput)-1]
+		}
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes {
+			for _, ch := range msg.Runes {
+				if ch >= '0' && ch <= '9' {
+					m.gotoInput = append(m.gotoInput, ch)
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// jumpToLine moves the cursor to the given 1-based line number.
+func (m Model) jumpToLine(n int) (Model, tea.Cmd) {
+	tab := &m.tabs[m.active]
+	if m.vimEnabled && tab.vim != nil {
+		tab.vim.Buf.MoveToLine(n)
+		tab.vim.ScrollToReveal(m.height - 1)
+		return m, nil
+	}
+	// Non-vim: use textarea — scroll to line n (0-based: n-1).
+	ta := &tab.ta
+	targetLine := n - 1
+	if targetLine < 0 {
+		targetLine = 0
+	}
+	// Move to top first.
+	for ta.Line() > 0 {
+		ta.CursorUp()
+	}
+	// Move down to target line.
+	for ta.Line() < targetLine {
+		cur := ta.Line()
+		ta.CursorDown()
+		if ta.Line() == cur {
+			break
+		}
+	}
+	return m, nil
+}
+
+func (m Model) renderGotoLineBar() string {
+	gotoStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("#1e1e1e")).
+		Foreground(lipgloss.Color("#9cdcfe"))
+	cursorSty := lipgloss.NewStyle().
+		Background(lipgloss.Color("#569cd6")).
+		Foreground(lipgloss.Color("#ffffff"))
+	hintSty := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555"))
+
+	var sb strings.Builder
+	sb.WriteString(gotoStyle.Render(":"))
+	for _, ch := range m.gotoInput {
+		sb.WriteString(gotoStyle.Render(string(ch)))
+	}
+	sb.WriteString(cursorSty.Render(" "))
+	sb.WriteString(hintSty.Render("  Enter go  Esc cancel"))
+	return sb.String()
+}
+
+// GotoOpen reports whether the goto-line bar is open.
+func (m Model) GotoOpen() bool { return m.gotoOpen }
+
+// RenameTabOpen reports whether the rename-tab bar is open.
+func (m Model) RenameTabOpen() bool { return m.renameTabOpen }
+
+// ─── Tab rename bar ───────────────────────────────────────────────────────────
+
+func (m Model) openRenameTab() (Model, tea.Cmd) {
+	m.renameTabOpen = true
+	m.renameTabErr = ""
+	// Pre-fill with current tab title (without extension).
+	current := m.tabs[m.active].Title
+	m.renameTabInput = []rune(current)
+	m.renameTabCursor = len(m.renameTabInput)
+	if m.vimEnabled {
+		return m, m.refreshVimInsertCursorBlink()
+	}
+	return m, nil
+}
+
+func (m Model) updateRenameTab(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		name := strings.TrimSpace(string(m.renameTabInput))
+		if name == "" {
+			m.renameTabErr = "name cannot be empty"
+			return m, nil
+		}
+		if strings.ContainsAny(name, `/\:*?"<>|`) {
+			m.renameTabErr = "name contains invalid characters"
+			return m, nil
+		}
+		m.renameTabOpen = false
+		m.renameTabErr = ""
+		return m.applyTabRename(name)
+	case "esc":
+		m.renameTabOpen = false
+		m.renameTabInput = nil
+		m.renameTabErr = ""
+		return m, nil
+	case "backspace":
+		if m.renameTabCursor > 0 {
+			m.renameTabInput = append(m.renameTabInput[:m.renameTabCursor-1], m.renameTabInput[m.renameTabCursor:]...)
+			m.renameTabCursor--
+		}
+		m.renameTabErr = ""
+		return m, nil
+	case "delete":
+		if m.renameTabCursor < len(m.renameTabInput) {
+			m.renameTabInput = append(m.renameTabInput[:m.renameTabCursor], m.renameTabInput[m.renameTabCursor+1:]...)
+		}
+		m.renameTabErr = ""
+		return m, nil
+	case "left":
+		if m.renameTabCursor > 0 {
+			m.renameTabCursor--
+		}
+		return m, nil
+	case "right":
+		if m.renameTabCursor < len(m.renameTabInput) {
+			m.renameTabCursor++
+		}
+		return m, nil
+	case "home", "ctrl+a":
+		m.renameTabCursor = 0
+		return m, nil
+	case "end", "ctrl+e":
+		m.renameTabCursor = len(m.renameTabInput)
+		return m, nil
+	default:
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			ins := []rune(msg.String())
+			newInput := make([]rune, 0, len(m.renameTabInput)+len(ins))
+			newInput = append(newInput, m.renameTabInput[:m.renameTabCursor]...)
+			newInput = append(newInput, ins...)
+			newInput = append(newInput, m.renameTabInput[m.renameTabCursor:]...)
+			m.renameTabInput = newInput
+			m.renameTabCursor += len(ins)
+			m.renameTabErr = ""
+		}
+		return m, nil
+	}
+}
+
+func (m Model) applyTabRename(name string) (Model, tea.Cmd) {
+	tab := &m.tabs[m.active]
+	// If the tab has a backing file, rename it on disk.
+	if tab.Path != "" {
+		dir := filepath.Dir(tab.Path)
+		// Use .sql extension.
+		newName := name
+		if !strings.HasSuffix(strings.ToLower(newName), ".sql") {
+			newName += ".sql"
+		}
+		newPath := filepath.Join(dir, newName)
+		if err := os.Rename(tab.Path, newPath); err == nil {
+			tab.Path = newPath
+		}
+		// Regardless of rename success, update display name.
+		tab.Title = name
+	} else {
+		tab.Title = name
+	}
+	if m.vimEnabled {
+		return m, m.refreshVimInsertCursorBlink()
+	}
+	return m, nil
+}
+
+func (m Model) renderRenameTabBar() string {
+	promptSty := lipgloss.NewStyle().
+		Background(lipgloss.Color("#1e1e1e")).
+		Foreground(lipgloss.Color("#c586c0"))
+	inputSty := lipgloss.NewStyle().
+		Background(lipgloss.Color("#1e1e1e")).
+		Foreground(lipgloss.Color("#d4d4d4"))
+	cursorSty := lipgloss.NewStyle().
+		Background(lipgloss.Color("#569cd6")).
+		Foreground(lipgloss.Color("#ffffff"))
+	errSty := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#f44747"))
+	hintSty := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#555555"))
+
+	var sb strings.Builder
+	sb.WriteString(promptSty.Render("Rename tab: "))
+	for i, ch := range m.renameTabInput {
+		if i == m.renameTabCursor {
+			sb.WriteString(cursorSty.Render(string(ch)))
+		} else {
+			sb.WriteString(inputSty.Render(string(ch)))
+		}
+	}
+	if m.renameTabCursor == len(m.renameTabInput) {
+		sb.WriteString(cursorSty.Render(" "))
+	}
+	if m.renameTabErr != "" {
+		sb.WriteString("  " + errSty.Render("✗ "+m.renameTabErr))
+	} else {
+		sb.WriteString(hintSty.Render("  Enter confirm  Esc cancel"))
+	}
+	return sb.String()
+}
+
 func (m Model) openRefactorPopup() (Model, tea.Cmd) {
 	m.popup = completionPopup{
 		items: []popupItem{{
@@ -2800,6 +3116,11 @@ func (m Model) openRefactorPopup() (Model, tea.Cmd) {
 			Detail:   "Wrap the active INSERT block with SQL Server IDENTITY_INSERT ON/OFF",
 			Shortcut: "i",
 			Action:   popupActionWrapIdentityInsert,
+		}, {
+			Text:     "Rename tab",
+			Detail:   "Rename this query tab and its workspace file",
+			Shortcut: "T",
+			Action:   popupActionRenameTab,
 		}},
 		selected: 0,
 		visible:  true,
@@ -2910,6 +3231,9 @@ func (m Model) applySelectedRefactor() (Model, tea.Cmd) {
 			return m.identityInsertRefactorVim()
 		}
 		return m.identityInsertRefactorTextarea()
+	case popupActionRenameTab:
+		m.popup.visible = false
+		return m.openRenameTab()
 	default:
 		m.popup.visible = false
 		if m.vimEnabled {
@@ -4966,6 +5290,42 @@ func detectBlockRange(text string, cursorLine int) (int, int, bool) {
 		return strings.TrimSpace(strings.ToUpper(line)) == "GO"
 	}
 
+	// isSetOp returns true if line is a bare set-operator keyword (UNION [ALL],
+	// INTERSECT [ALL], EXCEPT [ALL]).  These lines bridge blank-line gaps between
+	// query parts so that UNION ALL queries aren't split into separate blocks.
+	isSetOp := func(line string) bool {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		switch upper {
+		case "UNION", "UNION ALL", "INTERSECT", "INTERSECT ALL", "EXCEPT", "EXCEPT ALL":
+			return true
+		}
+		return false
+	}
+
+	// shouldCrossBlank returns true when blank line i sits between a set operator
+	// and the rest of the query, meaning the blank should not terminate the block.
+	shouldCrossBlank := func(i int) bool {
+		// nearest non-blank above i
+		for j := i - 1; j >= 0; j-- {
+			if strings.TrimSpace(lines[j]) != "" {
+				if isSetOp(lines[j]) {
+					return true
+				}
+				break
+			}
+		}
+		// nearest non-blank below i
+		for j := i + 1; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) != "" {
+				if isSetOp(lines[j]) {
+					return true
+				}
+				break
+			}
+		}
+		return false
+	}
+
 	start := 0
 	for i := effectiveCursorLine; i >= 0; i-- {
 		trimmed := strings.TrimSpace(lines[i])
@@ -4977,6 +5337,9 @@ func detectBlockRange(text string, cursorLine int) (int, int, bool) {
 			break
 		}
 		if i < effectiveCursorLine && trimmed == "" {
+			if shouldCrossBlank(i) {
+				continue
+			}
 			start = i + 1
 			break
 		}
@@ -4998,6 +5361,9 @@ func detectBlockRange(text string, cursorLine int) (int, int, bool) {
 			break
 		}
 		if i > effectiveCursorLine && trimmed == "" {
+			if shouldCrossBlank(i) {
+				continue
+			}
 			end = i - 1
 			break
 		}

@@ -27,11 +27,17 @@ const (
 	KindCommands
 	KindHistory
 	KindExport
+	KindSnippets
 )
 
 type AcceptedMsg struct {
 	Key  string
 	Kind Kind
+}
+
+// DeleteMsg is emitted when the user presses 'd' on a KindSnippets item.
+type DeleteMsg struct {
+	Key string
 }
 
 type CancelledMsg struct{}
@@ -92,6 +98,10 @@ func (m Model) OpenExport(items []Item, dest string) (Model, tea.Cmd) {
 		footer = "Enter export to file • Tab switch to clipboard • Esc close"
 	}
 	return m.open(KindExport, "Export → "+dest, "Filter formats", "No formats", footer, items)
+}
+
+func (m Model) OpenSnippets(items []Item) (Model, tea.Cmd) {
+	return m.open(KindSnippets, "Snippets", "Filter snippets", "No snippets saved", "Enter paste • d delete • Esc close", items)
 }
 
 func (m Model) open(kind Kind, title, placeholder, empty, footer string, items []Item) (Model, tea.Cmd) {
@@ -161,6 +171,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			item := m.filtered[m.cursor]
 			return m.Close(), func() tea.Msg { return AcceptedMsg{Key: item.Key, Kind: m.kind} }
+		case "d":
+			if m.kind == KindSnippets && len(m.filtered) > 0 {
+				item := m.filtered[m.cursor]
+				// Remove from items and re-filter without closing.
+				newItems := make([]Item, 0, len(m.items)-1)
+				for _, it := range m.items {
+					if it.Key != item.Key {
+						newItems = append(newItems, it)
+					}
+				}
+				m.items = newItems
+				m.syncFiltered()
+				if m.cursor >= len(m.filtered) && m.cursor > 0 {
+					m.cursor--
+				}
+				return m, func() tea.Msg { return DeleteMsg{Key: item.Key} }
+			}
 		}
 	}
 	var cmd tea.Cmd

@@ -176,6 +176,9 @@ func extractEditor(tbl *lua.LTable, cfg *EditorConfig) {
 	if v, ok := tableOptionalInt(tbl, "row_limit"); ok {
 		cfg.RowLimit = v
 	}
+	if v, ok := tableOptionalInt(tbl, "result_limit"); ok {
+		cfg.ResultLimit = v
+	}
 	if v, ok := tableOptionalString(tbl, "theme"); ok {
 		cfg.Theme = v
 	}

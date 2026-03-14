@@ -34,40 +34,50 @@ func (m Model) helpSections() []uihelp.Section {
 			"• Data dir: " + dataDir,
 			"• Named connections available: " + fmt.Sprintf("%d", len(named)),
 			"• Startup queries loaded: " + fmt.Sprintf("%d", len(m.cfg.Startup)),
+		mcpLine(m.mcpMode, m.mcpAddr),
 		},
 	}, {
 		Title: "Runtime keybindings",
 		Lines: []string{
 			"• F1 — help & settings",
-			"• Ctrl+P — command palette",
+			"• Ctrl+P — command palette (explain, transactions, snippets...)",
 			"• Ctrl+H — query history palette",
 			"• Ctrl+K — connection switcher",
 			"• Ctrl+N outside editor — add connection",
 			"• Ctrl+B / F2 — open schema browser popup",
-			"• F3 / Alt+1 — focus editor",
+			"• F3 / Alt+1 — focus editor (also exits results fullscreen)",
 			"• F4 / Alt+2 — focus results",
+			"• Ctrl+L — toggle results fullscreen (hides editor)",
 			"• Ctrl+Alt+V / Alt+V — toggle vim mode",
 			"• Ctrl+Q — quit and save session",
 			"• Ctrl+E — execute block under cursor",
-			"• Ctrl+R — refactor popup",
+			"• Ctrl+R — refactor popup (expand *, SELECT↔UPDATE, IDENTITY_INSERT, rename tab)",
 			"• Alt+Up / Alt+Down — previous/next query block",
 			"• Ctrl+Shift+F / Ctrl+F — format active block",
 			"• Ctrl+\\ — toggle comment on current line",
+			"• Ctrl+G / : (vim) — goto line",
 			"• F5 — confirm then execute full buffer",
-			"• Ctrl+V — paste from clipboard (reliable on all terminals)",
-		"• Ctrl+N — new tab (inside editor)",
+			"• Ctrl+V / Shift+Ins — paste from clipboard",
+			"• Ctrl+N — new tab (inside editor)",
 			"• Ctrl+W — close tab",
 			"• Ctrl+PgDn / Alt+L — next tab",
 			"• Ctrl+PgUp / Alt+H — previous tab",
 			"• Results: arrows / hjkl, PgUp/PgDn, Home/End, Alt+PgUp/PgDn",
-			"• Results: e — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
+			"• Results: f — filter column (regex)  F — clear all filters",
+			"• Results: s — cycle column sort (asc/desc/off)  p — pin/diff baseline  P — poll interval",
+			"• Results: # — toggle row numbers",
+			"• Results: L — change result limit",
+			"• Results: Enter — row detail view (j/k fields, h/l rows, y copy, Esc close)",
+			"• Results: X — open cell value viewer",
+			"• Results: y — yank cell value to clipboard",
+			"• Results: e — edit cell (generates UPDATE, pastes into editor)",
+			"• Results: E — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
+			"• Schema: Enter/↓ — go to list, type to filter, / — back to search",
+			"• Schema: ↑↓/jk navigate  Tab — column select  a — actions  r — row count  Esc — back/close",
 			"• Command palette: type to filter, ↑↓ select, Enter run, Esc close",
-			"• Connected command palette actions include explain current block / full buffer",
-			"• Connected command palette actions include transaction begin / commit / rollback and explicit run-in-transaction modes",
-			"• History palette: type to filter recent SQL, Enter paste into editor, Esc close",
-			"• Switcher: type to filter, ↑↓ select, Enter connect, Ctrl+N/A add, Esc close",
+			"• History palette: type to filter recent SQL, Enter paste, Esc close",
+			"• Switcher: type to filter, ↑↓ select, Enter connect, Ctrl+N add, Esc close",
 			"• Confirm dialogs: ←→ / Tab choose action, Enter confirm, Esc cancel",
-			"• Add connection: Tab focus, ←→ action, Enter submit, Esc cancel",
 			"• Help screen: ↑↓ PgUp/PgDn Home/End, Esc/F1 close",
 		},
 	}, {
@@ -154,4 +164,11 @@ func join(items []string, sep string) string {
 		out += sep + items[i]
 	}
 	return out
+}
+
+func mcpLine(active bool, addr string) string {
+	if !active {
+		return "• MCP server: off"
+	}
+	return "• MCP server: on  addr=" + addr
 }

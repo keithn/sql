@@ -20,20 +20,26 @@ Elm-pattern (bubbletea) TUI app. All inter-component communication uses `tea.Msg
 **Root model hierarchy:**
 ```
 app.Model
-├── editor.Model    — multi-tab query buffer with autocomplete popup
-├── results.Model   — scrollable grid, NULL shown as ∅
-├── schema.Model    — left-side tree overlay (Ctrl+B to toggle)
-└── statusbar.Model — connection name, focused pane, errors
+├── editor.Model    — multi-tab query buffer with autocomplete, vim mode, goto-line, tab rename
+├── results.Model   — scrollable grid, sort, stacked filters, row detail, row numbers, export
+├── schema.Model    — left-side tree overlay (Ctrl+B), row counts, action menu
+├── statusbar.Model — connection name, focused pane, column type, vim mode, txn state, errors
+├── cellview.Model  — single-cell value viewer with text selection (X key)
+├── palette.Model   — generic fuzzy palette (connection switcher, commands, history)
+├── modal.Model     — add-connection modal with keychain-backed save, confirmations
+└── help.Model      — F1 help/settings overlay
 ```
 
 **Key packages:**
 - `internal/app/` — root model, all message dispatch (`update.go`), layout (`view.go`), message types (`messages.go`)
-- `internal/db/` — `Driver` interface, `Session` wrapper, `connect.go` (DetectAndConnect), three driver packages (`mssql/`, `postgres/`, `sqlite/`) — **Introspect() is stubbed in all three**
-- `internal/ui/editor/` — textarea tabs, autocomplete (`complete.go` has 30 SQL keywords + schema names)
-- `internal/format/sql.go` — hand-rolled SQL formatter (89.9% test coverage)
-- `internal/connections/parse.go` — driver detection from connection strings (38.6% test coverage)
-- `internal/workspace/` — tab persistence to `<dataDir>/workspace/<connname>/queryN.sql`, session restore via `session.json`
+- `internal/db/` — `Driver` interface, `Session` wrapper, `connect.go` (DetectAndConnect), three driver packages (`mssql/`, `postgres/`, `sqlite/`) — all have working `Introspect()`
+- `internal/ui/editor/` — textarea+vim tabs, autocomplete (`complete.go`), refactors, formatter
+- `internal/ui/editor/vim/` — `Buffer` ([][]rune) + `State` (mode machine): Normal/Insert/Visual/V-LINE
+- `internal/format/sql.go` — hand-rolled SQL formatter
+- `internal/connections/` — `parse.go` driver detection, `store.go` keychain-backed password storage
+- `internal/workspace/` — tab persistence (`workspace/<connname>/queryN.sql`), session restore, query history (SQLite)
 - `internal/config/` — Lua config loader, `DataDir()` / `ConfigDir()` path resolution
+- `internal/testdb/` — test helpers: `SQLiteDB(t)` and `MSSQLDB(t)` (skip if `TEST_MSSQL_PASSWORD` unset)
 
 **Async flow for query execution:**
 1. `Ctrl+E` → `ExecuteBlockMsg` → `app.Update()` → `executeCmd()` (goroutine)
@@ -45,16 +51,34 @@ app.Model
 - `Ctrl+B` / `F2` — toggle schema overlay
 - `F3` / `Alt+1` — focus editor; `F4` / `Alt+2` — focus results
 - `Ctrl+Q` — quit (saves session)
-- `Tab` — insert 4 spaces (no popup); autocomplete triggers on 1+ word chars, Tab cycles, Enter accepts, Esc dismisses
+- `Tab` — insert 4 spaces (no popup); autocomplete triggers on 1+ word chars, Tab cycles, Ctrl+E accepts, Esc dismisses
+- `Ctrl+R` — refactor popup (expand SELECT *, convert SELECT↔UPDATE, wrap IDENTITY_INSERT, rename tab)
+- `Ctrl+G` — goto-line bar (also `:` in vim Normal mode)
+- `Ctrl+F` / `Ctrl+Shift+F` — format active SQL block
+- `Ctrl+\` — toggle line comment
+- `Ctrl+H` — query history palette
+- `Ctrl+K` — connection switcher palette
+- `Ctrl+P` — command palette
+- `Ctrl+N` — add connection modal
+- `Ctrl+Alt+V` — toggle vim mode
+- Results: `f` filter column, `F` clear all filters, `s` cycle sort, `#` row numbers, `l` set limit, `Enter` row detail, `e` export, `X` cell viewer, `y` yank cell
+- Schema: `Enter` SELECT, `Tab` column select, `a` action menu, `r` row count, `Esc` close
 
 **Persistence paths (Windows):**
 - Config: `%APPDATA%\sql\config.lua`
 - Workspace: `%LOCALAPPDATA%\sql\workspace\<connname>\queryN.sql`
 - Default workspace conn name: `_adhoc`
+- History: `%LOCALAPPDATA%\sql\workspace\history.db` (SQLite)
 
-## Current Gaps
+## Config (config.lua)
 
-- `Introspect()` in all three DB drivers returns empty `*db.Schema` (stubs)
-- `schema.Model.SetSchema()` is a stub — tree is not populated from introspected data
-- CLI `--add` and `--list` flags are TODOs in `cmd/sql/main.go`
-- No tests yet for `internal/app`, `internal/db`, `internal/ui/*`, `internal/workspace`
+```lua
+editor = {
+  tab_size = 4,
+  vim_mode = false,
+  result_limit = 500,
+}
+connections = {
+  { name = "prod", driver = "mssql", host = "server", database = "mydb" },
+}
+```

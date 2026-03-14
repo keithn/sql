@@ -3,12 +3,17 @@ package app
 import "github.com/charmbracelet/lipgloss"
 
 func (m Model) View() string {
-	editorView := m.editor.View()
 	resultsView := m.results.View()
 	statusView := m.statusbar.View()
 
-	// Stack editor, statusbar, and results vertically.
-	content := lipgloss.JoinVertical(lipgloss.Left, editorView, statusView, resultsView)
+	var content string
+	if m.resultsFullscreen {
+		// Hide editor; give all space to statusbar + results.
+		content = lipgloss.JoinVertical(lipgloss.Left, statusView, resultsView)
+	} else {
+		editorView := m.editor.View()
+		content = lipgloss.JoinVertical(lipgloss.Left, editorView, statusView, resultsView)
+	}
 
 	if m.modal.Active() {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.modal.View())
@@ -28,6 +33,10 @@ func (m Model) View() string {
 
 	if m.cellView.Active() {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.cellView.View())
+	}
+
+	if m.results.RowDetailOpen() {
+		return m.results.RowDetailView(m.width, m.height)
 	}
 
 	return content

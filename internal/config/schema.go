@@ -41,6 +41,7 @@ type EditorConfig struct {
 	VimMode          bool
 	Wrap             bool
 	RowLimit         int
+	ResultLimit      int // default rows fetched by schema browser SELECTs
 	Theme            string
 	ChromaTheme      string
 	FontWidth        int
