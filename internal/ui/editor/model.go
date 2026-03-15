@@ -2603,11 +2603,27 @@ func (m *Model) updatePopupVim() {
 	lineNum := buf.CursorRow()
 	line := buf.Line(lineNum)
 	col := buf.CursorCol()
+	lineText := string(line)
+
+	// AC4: suppress inside comments.
+	if cursorInsideComment(buf.Value(), lineNum, col) {
+		m.popup.visible = false
+		return
+	}
+
+	// Join completions take priority and can appear after "=" in JOIN ON context.
 	if items, word := joinCompletionItemsForText(buf.Value(), lineNum, col, m.schema); len(items) > 0 {
 		m.popup = completionPopup{items: items, selected: 0, visible: true, word: word, mode: popupModeCompletion, title: "Join"}
 		return
 	}
-	word := wordBefore(string(line), col)
+	word := wordBefore(lineText, col)
+
+	// AC5: suppress after comparison operators (=, <, >, LIKE).
+	// This runs after join-completion so that JOIN ON x = <popup> still works.
+	if cursorAfterComparisonOp(lineText, col) {
+		m.popup.visible = false
+		return
+	}
 
 	// A word character clears suppression; whitespace keeps it.
 	if word != "" {
@@ -2620,19 +2636,23 @@ func (m *Model) updatePopupVim() {
 
 	// Don't trigger on a new/blank line — only show contextual popup when
 	// there is non-whitespace content before the cursor on this line.
-	textBeforeCursor := string(line[:col])
+	textBeforeCursor := lineText
+	if col < len(textBeforeCursor) {
+		textBeforeCursor = textBeforeCursor[:col]
+	}
 	if word == "" && strings.TrimSpace(textBeforeCursor) == "" {
 		m.popup.visible = false
 		return
 	}
 
 	// Context-aware: if the query references specific tables, suggest only their columns.
-	if ctxItems := contextualColumnItems(word, buf.Value(), lineNum, m.schema); len(ctxItems) > 0 {
+	// AC1: contextualColumnItems now also handles dot-qualified prefix filtering.
+	if ctxItems := contextualColumnItems(word, buf.Value(), lineNum, col, m.schema); len(ctxItems) > 0 {
 		m.popup = completionPopup{items: ctxItems, selected: 0, visible: true, word: word, mode: popupModeCompletion}
 		return
 	}
 
-	items := getCompletions(word, m.schemaItems, 8)
+	items := getCompletionsCtx(word, m.schemaItems, 8, schemaFirstClause(detectLastSQLClause(buf.Value(), lineNum, col)))
 	if len(items) == 0 || word == "" {
 		m.popup.visible = false
 		return
@@ -2691,10 +2711,6 @@ func (m Model) acceptCompletionVim() Model {
 // updatePopup recomputes completions based on the word at the current cursor.
 func (m *Model) updatePopup() {
 	ta := &m.tabs[m.active].ta
-	if items, word := joinCompletionItemsForText(ta.Value(), ta.Line(), ta.LineInfo().CharOffset, m.schema); len(items) > 0 {
-		m.popup = completionPopup{items: items, selected: 0, visible: true, word: word, mode: popupModeCompletion, title: "Join"}
-		return
-	}
 	lines := strings.Split(ta.Value(), "\n")
 	lineNum := ta.Line()
 	lineText := ""
@@ -2702,7 +2718,26 @@ func (m *Model) updatePopup() {
 		lineText = lines[lineNum]
 	}
 	col := ta.LineInfo().CharOffset
+
+	// AC4: suppress inside comments.
+	if cursorInsideComment(ta.Value(), lineNum, col) {
+		m.popup.visible = false
+		return
+	}
+
+	// Join completions take priority and can appear after "=" in JOIN ON context.
+	if items, word := joinCompletionItemsForText(ta.Value(), lineNum, col, m.schema); len(items) > 0 {
+		m.popup = completionPopup{items: items, selected: 0, visible: true, word: word, mode: popupModeCompletion, title: "Join"}
+		return
+	}
 	word := wordBefore(lineText, col)
+
+	// AC5: suppress after comparison operators (=, <, >, LIKE).
+	// Runs after join-completion so that JOIN ON x = <popup> still works.
+	if cursorAfterComparisonOp(lineText, col) {
+		m.popup.visible = false
+		return
+	}
 
 	// A word character clears suppression; whitespace keeps it.
 	if word != "" {
@@ -2722,12 +2757,13 @@ func (m *Model) updatePopup() {
 	}
 
 	// Context-aware: if the query references specific tables, suggest only their columns.
-	if ctxItems := contextualColumnItems(word, ta.Value(), lineNum, m.schema); len(ctxItems) > 0 {
+	// AC1: contextualColumnItems now also handles dot-qualified prefix filtering.
+	if ctxItems := contextualColumnItems(word, ta.Value(), lineNum, col, m.schema); len(ctxItems) > 0 {
 		m.popup = completionPopup{items: ctxItems, selected: 0, visible: true, word: word, mode: popupModeCompletion}
 		return
 	}
 
-	items := getCompletions(word, m.schemaItems, 8)
+	items := getCompletionsCtx(word, m.schemaItems, 8, schemaFirstClause(detectLastSQLClause(ta.Value(), lineNum, col)))
 	if len(items) == 0 || word == "" {
 		m.popup.visible = false
 		return

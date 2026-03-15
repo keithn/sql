@@ -385,6 +385,274 @@ func TestCellEditGeneratesUPDATE(t *testing.T) {
 	}
 }
 
+// --- Find in results (/) ---
+
+func TestFindBasicMatching(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT ProductID, Name, Price FROM Products ORDER BY ProductID")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	// Open find bar with /.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if !rm.FindOpen() {
+		t.Fatal("find bar should be open after /")
+	}
+
+	// Type "et" — matches "Widget" (row 0) and "Gadget" (row 1).
+	for _, r := range "et" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	matches := rm.FindMatches()
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 matches for 'et', got %d", len(matches))
+	}
+	// Both matches should be in the Name column (col 1).
+	for _, m := range matches {
+		if m[1] != 1 {
+			t.Errorf("expected match in col 1 (Name), got col %d", m[1])
+		}
+	}
+
+	view := rm.View()
+	if !strings.Contains(view, "2/2") && !strings.Contains(view, "1/2") {
+		t.Errorf("view should show match count; got: %s", view)
+	}
+}
+
+func TestFindNavigation(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	// "9.99" matches Widget (row 0, Price col 2) and Doohickey (row 2, Price col 2).
+	qrs, _ := sess.Execute(ctx, "SELECT ProductID, Name, Price FROM Products ORDER BY ProductID")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "9.99" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	// Press Enter to close bar.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if rm.FindOpen() {
+		t.Fatal("find bar should be closed after Enter")
+	}
+	// Find should remain active.
+	if len(rm.FindMatches()) == 0 {
+		t.Fatal("find matches should persist after Enter closes the bar")
+	}
+
+	cur0 := rm.FindCurrent()
+
+	// Press n — advance to next match.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	cur1 := rm.FindCurrent()
+	if cur1 == cur0 && len(rm.FindMatches()) > 1 {
+		t.Error("n should advance findCurrent")
+	}
+
+	// Press N — go back.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	cur2 := rm.FindCurrent()
+	if cur2 != cur0 {
+		t.Errorf("N should return to original match: got %d want %d", cur2, cur0)
+	}
+}
+
+func TestFindWraparound(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT ProductID, Name FROM Products ORDER BY ProductID")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	// "et" matches "Widget" (row 0, Name col) and "Gadget" (row 1, Name col).
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "et" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	total := len(rm.FindMatches())
+	if total < 2 {
+		t.Fatalf("expected at least 2 matches for 'it', got %d", total)
+	}
+
+	// Navigate to the last match.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	last := rm.FindCurrent()
+	if last != total-1 {
+		t.Fatalf("N from first match should wrap to last, got %d want %d", last, total-1)
+	}
+
+	// n from last should wrap to first.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if rm.FindCurrent() != 0 {
+		t.Errorf("n from last match should wrap to 0, got %d", rm.FindCurrent())
+	}
+}
+
+func TestFindEscClearsState(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "Widget" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(rm.FindMatches()) == 0 {
+		t.Fatal("should have matches before Esc")
+	}
+
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if rm.FindOpen() {
+		t.Error("find bar should be closed after Esc")
+	}
+	if len(rm.FindMatches()) != 0 {
+		t.Error("find matches should be cleared after Esc")
+	}
+	view := rm.View()
+	if strings.Contains(view, "🔍") {
+		t.Error("view should not show find indicator after Esc")
+	}
+}
+
+func TestFindNoMatches(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "zzznomatch" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	if len(rm.FindMatches()) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(rm.FindMatches()))
+	}
+
+	// n/N with no matches should not panic.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+}
+
+func TestFindCaseInsensitive(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products ORDER BY ProductID")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	// "WIDGET" upper-case should match "Widget".
+	for _, r := range "WIDGET" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	if len(rm.FindMatches()) == 0 {
+		t.Error("find should be case-insensitive: WIDGET should match Widget")
+	}
+}
+
+func TestFindStateResetOnSetResults(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	// Open find and type a pattern.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "Widget" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(rm.FindMatches()) == 0 {
+		t.Fatal("should have matches before SetResults")
+	}
+
+	// Load new results — find state must be fully cleared.
+	qrs2, _ := sess.Execute(ctx, "SELECT OrderID, CustomerID FROM Orders")
+	rm = rm.SetResults(qrs2)
+
+	if rm.FindOpen() {
+		t.Error("findOpen should be false after SetResults")
+	}
+	if len(rm.FindMatches()) != 0 {
+		t.Error("findMatches should be nil after SetResults")
+	}
+	if rm.FindCurrent() != -1 {
+		t.Errorf("findCurrent should be -1 after SetResults, got %d", rm.FindCurrent())
+	}
+
+	// Pressing n should be a no-op (not panic, not use stale indices).
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+}
+
+func TestFindInputEditing(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+
+	// Type "Widgxt".
+	for _, r := range "Widgxt" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	// Backspace twice to remove "xt".
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	// Type "et" to get "Widget".
+	for _, r := range "et" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	if len(rm.FindMatches()) == 0 {
+		t.Error("after editing to 'Widget', should have matches")
+	}
+
+	// Ctrl+U should clear.
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if len(rm.FindMatches()) != 0 {
+		t.Error("Ctrl+U should clear the find input and matches")
+	}
+}
+
+func TestFindHighlightInView(t *testing.T) {
+	_, sess := testdb.SQLiteDB(t)
+	ctx := context.Background()
+	qrs, _ := sess.Execute(ctx, "SELECT Name FROM Products ORDER BY ProductID")
+
+	rm := results.New().SetSize(120, 20).SetResults(qrs).Focus()
+
+	viewBefore := rm.View()
+
+	// Activate find for "Widget".
+	rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "Widget" {
+		rm, _ = rm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	viewAfter := rm.View()
+	if viewBefore == viewAfter {
+		t.Error("view should change when find is active")
+	}
+	// Find indicator should appear.
+	if !strings.Contains(viewAfter, "🔍") {
+		t.Error("view should contain find indicator 🔍")
+	}
+}
+
 // --- MSSQL: TOP N generation, FK introspection ---
 
 func TestMSSQLTopNGeneration(t *testing.T) {

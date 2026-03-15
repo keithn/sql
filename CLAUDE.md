@@ -24,7 +24,8 @@ app.Model
 ├── results.Model   — scrollable grid, sort, stacked filters, row detail, row numbers, export
 ├── schema.Model    — left-side tree overlay (Ctrl+B), row counts, action menu
 ├── statusbar.Model — connection name, focused pane, column type, vim mode, txn state, errors
-├── cellview.Model  — single-cell value viewer with text selection (X key)
+├── cellview.Model  — single-cell value viewer with text selection (v key)
+├── rowedit.Model   — multi-column row edit form (E key), generates multi-SET UPDATE
 ├── palette.Model   — generic fuzzy palette (connection switcher, commands, history)
 ├── modal.Model     — add-connection modal with keychain-backed save, confirmations
 └── help.Model      — F1 help/settings overlay
@@ -61,7 +62,7 @@ app.Model
 - `Ctrl+P` — command palette
 - `Ctrl+N` — add connection modal
 - `Ctrl+Alt+V` — toggle vim mode
-- Results: `f` filter column, `F` clear all filters, `s` cycle sort, `#` row numbers, `l` set limit, `Enter` row detail, `e` export, `X` cell viewer, `y` yank cell
+- Results: `/` find across all columns (n/N navigate, Esc clear), `f` filter column, `F` clear all filters, `s` cycle sort, `#` row numbers, `L` set limit, `Enter` row detail, `e` edit cell (single column), `E` row edit form (multi-column UPDATE), `X` export, `v` cell viewer, `y` yank cell
 - Schema: `Enter` SELECT, `Tab` column select, `a` action menu, `r` row count, `Esc` close
 
 **Persistence paths (Windows):**

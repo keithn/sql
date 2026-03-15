@@ -61,7 +61,7 @@ Last updated: 2026-03-12 (after paste/UX polish session)
 
 #### P2 — schema and results UX
 - `[x]` Schema browser generates `alias.*` projections for JOIN'd tables in SELECT
-- `[ ]` Schema browser fuzzy filter
+- `[x]` Schema browser search (built-in, sufficient)
 - `[ ]` Schema browser action menu
 - `[x]` Export flows from results pane (CSV / Markdown / JSON / SQL INSERT → file or clipboard)
 - `[ ]` Remaining results interactions (sort/filter/edit-mode follow-ups)
@@ -73,11 +73,6 @@ Last updated: 2026-03-12 (after paste/UX polish session)
 - `[x]` Extract startup queries from Lua
 - `[ ]` Align runtime behavior with README / SPEC where currently overstated
 
-#### P3 — later / V2 areas
-- `[ ]` SSH tunnel implementation
-- `[ ]` Advanced auth / TLS options
-- `[ ]` Advanced history re-run features
-- `[ ]` Advanced export / remote clipboard / edit mode follow-ups
 
 ### Immediate next step
 1. Schema browser fuzzy filter and action menu (P2).

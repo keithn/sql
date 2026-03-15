@@ -2,6 +2,7 @@
 package celledit
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -128,7 +129,7 @@ func (m Model) Open(colName, value string) (Model, tea.Cmd) {
 		}
 		m.vs.SetSize(innerW, innerH)
 		m.vs.Buf.SetValue(value)
-		// Start in normal mode; user can press i to enter insert.
+		// Start in NORMAL mode so vim users can navigate before editing.
 		return m, nil
 	}
 	m.ta.Reset()
@@ -205,14 +206,31 @@ func (m Model) View() string {
 		if m.vs.Mode == vim.ModeInsert {
 			mode = "INSERT"
 		}
-		hint = modeStyle.Render(mode) + hintStyle.Render("  •  Ctrl+S confirm  •  Ctrl+D set NULL  •  Esc normal/cancel")
+		total := m.vs.Buf.LineCount()
+		cur := m.vs.Buf.CursorRow() + 1
+		pos := fmt.Sprintf("  •  %d/%d", cur, total)
+		hint = modeStyle.Render(mode) + hintStyle.Render("  •  Ctrl+S confirm  •  Ctrl+D set NULL  •  Esc normal→cancel"+pos)
 	} else {
 		body = m.ta.View()
-		hint = hintStyle.Render("Ctrl+S confirm  •  Ctrl+D set NULL  •  Esc cancel  •  Enter newline")
+		total := m.ta.LineCount()
+		cur := m.ta.Line() + 1
+		var pos string
+		taH := m.height - 5
+		if taH < 3 {
+			taH = 3
+		}
+		if total > taH {
+			pos = fmt.Sprintf("  •  %d/%d lines", cur, total)
+		}
+		hint = hintStyle.Render("Ctrl+S confirm  •  Ctrl+D set NULL  •  Esc cancel  •  Enter newline" + pos)
 	}
 
 	inner := strings.Join([]string{title, "", body, "", hint}, "\n")
-	return panelStyle.Width(m.width).Render(inner)
+	innerW := m.width - 4
+	if innerW < 20 {
+		innerW = 20
+	}
+	return panelStyle.Width(innerW).Render(inner)
 }
 
 func (m Model) renderVim() string {
@@ -245,6 +263,10 @@ func (m Model) renderVim() string {
 			continue
 		}
 		line := buf.Line(row)
+		// Truncate line to innerW so it doesn't overflow the panel.
+		if len(line) > innerW {
+			line = line[:innerW]
+		}
 		var lineSB strings.Builder
 		for c, ch := range line {
 			if row == curRow && c == curCol {
@@ -253,13 +275,13 @@ func (m Model) renderVim() string {
 				lineSB.WriteString(textStyle.Render(string(ch)))
 			}
 		}
-		// Cursor past end of line.
-		if row == curRow && curCol >= len(line) {
+		// Cursor past end of line (only if within visible width).
+		if row == curRow && curCol >= len(line) && len(line) < innerW {
 			lineSB.WriteString(cs.Render(" "))
 		}
 		// Pad to width.
 		visual := len(line)
-		if row == curRow && curCol >= len(line) {
+		if row == curRow && curCol >= len(line) && len(line) < innerW {
 			visual++
 		}
 		if visual < innerW {

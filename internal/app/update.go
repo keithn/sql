@@ -26,6 +26,7 @@ import (
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
 	"github.com/sqltui/sql/internal/ui/results"
+	"github.com/sqltui/sql/internal/ui/rowedit"
 	"github.com/sqltui/sql/internal/ui/schema"
 	"github.com/sqltui/sql/internal/ui/updatepreview"
 	"github.com/sqltui/sql/internal/workspace"
@@ -122,6 +123,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.snippetSaveOpen {
 			return m.handleSnippetSaveKey(msg)
 		}
+		// When the row edit form is open, handle it exclusively.
+		if m.rowEdit.Active() {
+			var cmd tea.Cmd
+			m.rowEdit, cmd = m.rowEdit.Update(msg)
+			return m, cmd
+		}
 		// When the cell edit overlay is open, handle it exclusively.
 		if m.cellEdit.Active() {
 			var cmd tea.Cmd
@@ -134,8 +141,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updatePreview, cmd = m.updatePreview.Update(msg)
 			return m, cmd
 		}
-		// When the results filter, poll, limit bar, or row detail is open, bypass global key shortcuts.
-		if m.results.FilterOpen() || m.results.PollOpen() || m.results.LimitOpen() || m.results.RowDetailOpen() {
+		// When the results filter, find, poll, limit bar, or row detail is open, bypass global key shortcuts.
+		if m.results.FilterOpen() || m.results.FindOpen() || m.results.PollOpen() || m.results.LimitOpen() || m.results.RowDetailOpen() {
 			return m.routeToFocused(msg)
 		}
 		// When the editor goto-line or rename bar is open, bypass global key shortcuts.
@@ -562,6 +569,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case rowedit.SubmittedMsg:
+		return m.handleRowEditSubmitted(msg)
+
+	case rowedit.CancelledMsg:
+		return m, nil
+
 	case celledit.SubmittedMsg:
 		ctx := m.cellEditCtx
 		if ctx.ColName == "" {
@@ -647,26 +660,41 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+h":
 		return m.openHistoryPalette()
 
-	case "E":
+	case "X":
+		// Export results (moved from E to make room for row edit form).
 		if m.focused == PaneResults {
 			return m.openExportPalette()
 		}
+
+	case "E":
+		// Row edit form — multi-column UPDATE from the current row.
+		if m.focused == PaneResults {
+			return m.openRowEdit()
+		}
+		m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+		return m.routeToFocused(msg)
 
 	case "e":
 		if m.focused == PaneResults {
 			return m.openCellEdit()
 		}
+		m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+		return m.routeToFocused(msg)
 
 	case "v":
 		if m.focused == PaneResults {
 			return m.openCellView()
 		}
+		m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+		return m.routeToFocused(msg)
 
 	case "f":
 		if m.focused == PaneResults {
 			m.results = m.results.OpenFilter()
 			return m, nil
 		}
+		m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+		return m.routeToFocused(msg)
 
 	case "r":
 		if m.focused == PaneResults && m.lastSQL != "" && m.session != nil {
@@ -674,6 +702,22 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusbar = m.statusbar.SetError("")
 			m.statusbar = m.statusbar.SetRows(0).SetDuration(0)
 			return m, executeCmd(m.session, m.lastSQL)
+		}
+		if m.focused != PaneResults {
+			m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+			return m.routeToFocused(msg)
+		}
+
+	case "s":
+		if m.focused != PaneResults {
+			m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+			return m.routeToFocused(msg)
+		}
+
+	case "/":
+		if m.focused != PaneResults {
+			m.statusbar = m.statusbar.SetError("focus results pane first (F4)")
+			return m.routeToFocused(msg)
 		}
 
 	case "P":
@@ -1071,6 +1115,89 @@ func (m Model) handleSnippetDelete(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openRowEdit opens the multi-column row edit form for the cursor row.
+func (m Model) openRowEdit() (tea.Model, tea.Cmd) {
+	ctx, ok := m.results.CurrentCellContext()
+	if !ok {
+		m.statusbar = m.statusbar.SetError("no row selected")
+		return m, nil
+	}
+	if len(ctx.Columns) == 0 {
+		m.statusbar = m.statusbar.SetError("no columns in result set")
+		return m, nil
+	}
+	vimEnabled := m.editor.VimMode() != ""
+	m.rowEdit = m.rowEdit.SetSize(m.width, m.height)
+	var cmd tea.Cmd
+	m.rowEdit, cmd = m.rowEdit.Open(ctx.Columns, ctx.Row, vimEnabled)
+	return m, cmd
+}
+
+// handleRowEditSubmitted generates a multi-column UPDATE from the row edit form result.
+func (m Model) handleRowEditSubmitted(msg rowedit.SubmittedMsg) (tea.Model, tea.Cmd) {
+	if len(msg.Updates) == 0 {
+		m.statusbar = m.statusbar.SetError("no changes to apply")
+		return m, nil
+	}
+	updateSQL := generateMultiUpdateSQL(msg, m.lastSQL)
+	if updateSQL == "" {
+		m.statusbar = m.statusbar.SetError("cannot generate UPDATE: could not determine table or PK")
+		return m, nil
+	}
+	m.statusbar = m.statusbar.SetError("")
+	m.updatePreview = m.updatePreview.Open(updateSQL)
+	return m, nil
+}
+
+// generateMultiUpdateSQL produces an UPDATE statement for multiple modified fields.
+func generateMultiUpdateSQL(msg rowedit.SubmittedMsg, lastSQL string) string {
+	table := export.ExtractTableName(lastSQL)
+	if table == "" {
+		return ""
+	}
+	// Detect PK column using same heuristic as generateUpdateSQL.
+	pkCol := -1
+	for i, col := range msg.AllColumns {
+		if strings.EqualFold(col.Name, "id") {
+			pkCol = i
+			break
+		}
+	}
+	if pkCol < 0 {
+		for i, col := range msg.AllColumns {
+			if strings.HasSuffix(strings.ToLower(col.Name), "id") {
+				pkCol = i
+				break
+			}
+		}
+	}
+	if pkCol < 0 && len(msg.AllColumns) > 0 {
+		pkCol = 0
+	}
+	if pkCol < 0 || pkCol >= len(msg.Row) {
+		return ""
+	}
+	pkVal := formatSQLLiteral(msg.Row[pkCol])
+	pkName := msg.AllColumns[pkCol].Name
+
+	setClauses := make([]string, 0, len(msg.Updates))
+	for _, u := range msg.Updates {
+		var val string
+		if u.SetNull {
+			val = "NULL"
+		} else {
+			val = formatSQLLiteral(u.NewValue)
+		}
+		setClauses = append(setClauses, fmt.Sprintf("    %s = %s", quoteIdent(u.ColName), val))
+	}
+	return fmt.Sprintf("UPDATE %s\nSET\n%s\nWHERE %s = %s",
+		table,
+		strings.Join(setClauses, ",\n"),
+		quoteIdent(pkName),
+		pkVal,
+	)
+}
+
 // openCellEdit opens the cell edit popup overlay for the cursor cell.
 func (m Model) openCellEdit() (tea.Model, tea.Cmd) {
 	ctx, ok := m.results.CurrentCellContext()
@@ -1140,9 +1267,18 @@ func formatSQLLiteral(v any) string {
 	if t, ok := v.(time.Time); ok {
 		return "'" + formatTimeSQL(t) + "'"
 	}
-	// []byte comes back from some drivers (e.g. MSSQL varchar columns).
-	// Convert to string before any further processing.
+	// []byte comes back from some drivers (e.g. MSSQL varchar/binary columns).
 	if b, ok := v.([]byte); ok {
+		if len(b) == 16 {
+			// MSSQL uniqueidentifier: mixed-endian UUID bytes.
+			// First three components are little-endian; last two are big-endian.
+			return fmt.Sprintf("'%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x'",
+				b[3], b[2], b[1], b[0],
+				b[5], b[4],
+				b[7], b[6],
+				b[8], b[9],
+				b[10], b[11], b[12], b[13], b[14], b[15])
+		}
 		v = string(b)
 	}
 	s := fmt.Sprintf("%v", v)
@@ -1751,6 +1887,7 @@ func (m Model) applySize() (tea.Model, tea.Cmd) {
 	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 24))
 	m.cellView = m.cellView.SetSize(m.width, m.height)
 	m.cellEdit = m.cellEdit.SetSize(m.width, m.height)
+	m.rowEdit = m.rowEdit.SetSize(m.width, m.height)
 	m.updatePreview = m.updatePreview.SetSize(m.width, m.height)
 	m.palette = m.palette.SetSize(layout.contentW-6, minInt(m.height-4, 12))
 	m.modal = m.modal.SetSize(layout.contentW-4, minInt(m.height-4, 22))

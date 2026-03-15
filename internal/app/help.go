@@ -35,6 +35,7 @@ func (m Model) helpTabs() []uihelp.Tab {
 		Sections: []uihelp.Section{{
 			Title: "Editing",
 			Lines: []string{
+				"• Ctrl+Z — undo not supported in non-vim mode; switch to vim for u / Ctrl+R undo",
 				"• Ctrl+E — execute block under cursor",
 				"• F5 — confirm then execute full buffer",
 				"• Ctrl+Shift+F / Ctrl+F — format active block",
@@ -94,7 +95,7 @@ func (m Model) helpTabs() []uihelp.Tab {
 			Title: "Viewing",
 			Lines: []string{
 				"• Enter — row detail view (j/k fields, h/l rows, y copy, Esc close)",
-				"• X — open cell value viewer",
+				"• v — open cell value viewer",
 				"• y — yank cell value to clipboard",
 				"• # — toggle row numbers",
 				"• Ctrl+L — toggle results fullscreen (hides editor)",
@@ -102,6 +103,7 @@ func (m Model) helpTabs() []uihelp.Tab {
 		}, {
 			Title: "Filtering & sorting",
 			Lines: []string{
+				"• / — find across all columns (n/N next/prev, Esc clear)",
 				"• f — filter column (regex)",
 				"• F — clear all filters",
 				"• s — cycle column sort (asc / desc / off)",
@@ -110,11 +112,12 @@ func (m Model) helpTabs() []uihelp.Tab {
 		}, {
 			Title: "Actions",
 			Lines: []string{
-				"• e — edit cell (generates UPDATE, pastes into editor)",
-				"• E — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
-				"• p — pin / diff baseline",
+				"• e — edit cell (generates single-column UPDATE, pastes into editor)",
+				"• E — row edit form (Tab/Shift+Tab fields, Ctrl+S multi-column UPDATE, Esc cancel)",
+				"• X — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
+				"• p — pin baseline; re-run query then p again to see diff",
 				"• P — set poll interval (auto-refresh)",
-				"• Ctrl+E / Ctrl+R — re-run last query",
+				"• r — re-run last query",
 			},
 		}},
 	}

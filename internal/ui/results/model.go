@@ -73,6 +73,18 @@ var (
 	noMatchStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#555555")).
 			Italic(true)
+
+	findMatchStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#5a4a00")).
+			Foreground(lipgloss.Color("#ffffff"))
+
+	findCurrentMatchStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#b87200")).
+				Foreground(lipgloss.Color("#ffffff"))
+
+	findPromptStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#dcdcaa")).
+			Bold(true)
 )
 
 // CellYankMsg is sent when the user yanks (copies) the current cell value.
@@ -162,6 +174,15 @@ type Model struct {
 	pinnedResult *db.QueryResult // baseline pinned result; nil = not pinned
 	diffMode     bool            // true when showing a diff against pinnedResult
 	diffRows     []diffRow       // computed diff rows; valid when diffMode == true
+
+	// Find-in-results (/ key).
+	findOpen    bool
+	findInput   []rune
+	findCursor  int
+	findRE      *regexp.Regexp
+	findErr     string
+	findMatches [][2]int // [rowIdx, colIdx] into activeRows()
+	findCurrent int      // index into findMatches; -1 = none
 }
 
 type diffStatus int
@@ -180,7 +201,7 @@ type diffRow struct {
 }
 
 func New() Model {
-	return Model{filterCol: -1, filterHistSel: -1, sortCol: -1}
+	return Model{filterCol: -1, filterHistSel: -1, sortCol: -1, findCurrent: -1}
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -199,6 +220,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		if m.filterOpen {
 			return m.updateFilter(msg)
+		}
+		if m.findOpen {
+			return m.updateFind(msg)
 		}
 
 		rs := m.activeResult()
@@ -381,6 +405,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 			m.tagRange = false
+			return m, nil
+		case "/":
+			m = m.OpenFind()
+			return m, nil
+		case "n":
+			if len(m.findMatches) > 0 {
+				m.findCurrent = (m.findCurrent + 1) % len(m.findMatches)
+				m.jumpToFind(vis)
+			}
+			return m, nil
+		case "N":
+			if len(m.findMatches) > 0 {
+				m.findCurrent = (m.findCurrent - 1 + len(m.findMatches)) % len(m.findMatches)
+				m.jumpToFind(vis)
+			}
 			return m, nil
 		case "enter":
 			if rs != nil && m.cursorRow < len(activeRows) {
@@ -1171,6 +1210,204 @@ func (m Model) filterCellDisplay(val any, col int) (string, bool) {
 	return formatCell(val), false
 }
 
+// FindOpen reports whether the find bar is open.
+func (m Model) FindOpen() bool { return m.findOpen }
+
+// FindMatches returns the current set of find matches as [rowIdx, colIdx] pairs.
+func (m Model) FindMatches() [][2]int { return m.findMatches }
+
+// FindCurrent returns the index of the current find match, or -1 if none.
+func (m Model) FindCurrent() int { return m.findCurrent }
+
+// clearFind resets all find state to empty.
+func (m *Model) clearFind() {
+	m.findOpen = false
+	m.findInput = nil
+	m.findCursor = 0
+	m.findRE = nil
+	m.findErr = ""
+	m.findMatches = nil
+	m.findCurrent = -1
+}
+
+// OpenFind opens the find bar.
+func (m Model) OpenFind() Model {
+	m.clearFind()
+	m.findOpen = true
+	return m
+}
+
+// liveFindRE compiles the current find input into findRE and recomputes matches.
+func (m *Model) liveFindRE() {
+	input := string(m.findInput)
+	if input == "" {
+		m.findErr = ""
+		m.findRE = nil
+		m.findMatches = nil
+		m.findCurrent = -1
+		return
+	}
+	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(input))
+	if err != nil {
+		m.findErr = err.Error()
+		m.findRE = nil
+		m.findMatches = nil
+		m.findCurrent = -1
+		return
+	}
+	m.findErr = ""
+	m.findRE = re
+	m.computeFinds()
+}
+
+// computeFinds builds the findMatches slice for the current findRE.
+func (m *Model) computeFinds() {
+	m.findMatches = nil
+	m.findCurrent = -1
+	if m.findRE == nil {
+		return
+	}
+	rows := m.activeRows()
+	for ri, row := range rows {
+		for ci, val := range row {
+			if m.findRE.MatchString(formatCellRaw(val)) {
+				m.findMatches = append(m.findMatches, [2]int{ri, ci})
+			}
+		}
+	}
+	if len(m.findMatches) > 0 {
+		// Start at first match at or after current cursor position.
+		m.findCurrent = 0
+		for i, match := range m.findMatches {
+			if match[0] > m.cursorRow || (match[0] == m.cursorRow && match[1] >= m.cursorCol) {
+				m.findCurrent = i
+				break
+			}
+		}
+	}
+}
+
+// jumpToFind moves the cursor to findMatches[findCurrent] and scrolls to show it.
+func (m *Model) jumpToFind(vis int) {
+	if m.findCurrent < 0 || m.findCurrent >= len(m.findMatches) {
+		return
+	}
+	match := m.findMatches[m.findCurrent]
+	m.cursorRow = match[0]
+	m.cursorCol = match[1]
+	if m.cursorRow < m.scrollRow {
+		m.scrollRow = m.cursorRow
+	}
+	if m.cursorRow >= m.scrollRow+vis {
+		m.scrollRow = m.cursorRow - vis + 1
+	}
+}
+
+// updateFind handles key input when the find bar is open.
+func (m Model) updateFind(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.clearFind()
+		return m, nil
+	case "enter":
+		// Close bar but keep find active; jump to current match.
+		m.findOpen = false
+		if len(m.findMatches) > 0 {
+			vis := m.visibleRows()
+			m.jumpToFind(vis)
+		}
+		return m, nil
+	case "ctrl+n", "down":
+		if len(m.findMatches) > 0 {
+			m.findCurrent = (m.findCurrent + 1) % len(m.findMatches)
+			vis := m.visibleRows()
+			m.jumpToFind(vis)
+		}
+		return m, nil
+	case "ctrl+p", "up":
+		if len(m.findMatches) > 0 {
+			m.findCurrent = (m.findCurrent - 1 + len(m.findMatches)) % len(m.findMatches)
+			vis := m.visibleRows()
+			m.jumpToFind(vis)
+		}
+		return m, nil
+	case "left":
+		if m.findCursor > 0 {
+			m.findCursor--
+		}
+	case "right":
+		if m.findCursor < len(m.findInput) {
+			m.findCursor++
+		}
+	case "home", "ctrl+a":
+		m.findCursor = 0
+	case "end", "ctrl+e":
+		m.findCursor = len(m.findInput)
+	case "backspace":
+		if m.findCursor > 0 {
+			m.findInput = append(m.findInput[:m.findCursor-1], m.findInput[m.findCursor:]...)
+			m.findCursor--
+			m.liveFindRE()
+		}
+	case "delete":
+		if m.findCursor < len(m.findInput) {
+			m.findInput = append(m.findInput[:m.findCursor], m.findInput[m.findCursor+1:]...)
+			m.liveFindRE()
+		}
+	case "ctrl+u":
+		m.findInput = nil
+		m.findCursor = 0
+		m.liveFindRE()
+	default:
+		if msg.Type == tea.KeyRunes {
+			ins := msg.Runes
+			m.findInput = append(m.findInput[:m.findCursor], append(ins, m.findInput[m.findCursor:]...)...)
+			m.findCursor += len(ins)
+			m.liveFindRE()
+		}
+	}
+	return m, nil
+}
+
+func (m Model) renderFindBar() string {
+	total := len(m.findMatches)
+	var countStr string
+	if m.findRE != nil {
+		if total == 0 {
+			countStr = filterErrStyle.Render("  no matches")
+		} else {
+			cur := m.findCurrent + 1
+			countStr = findPromptStyle.Render(fmt.Sprintf("  %d/%d", cur, total))
+		}
+	}
+	prompt := findPromptStyle.Render("/ ") + metaStyle.Render("find: ")
+	input := m.renderFindInput()
+	if m.findErr != "" {
+		errShort := m.findErr
+		if runeLen(errShort) > 40 {
+			errShort = string([]rune(errShort)[:40]) + "…"
+		}
+		return prompt + input + "  " + filterErrStyle.Render("✗ "+errShort) + "\n"
+	}
+	hint := metaStyle.Render("  Enter close  Esc clear  ↑↓ navigate")
+	return prompt + input + countStr + hint + "\n"
+}
+
+func (m Model) renderFindInput() string {
+	var sb strings.Builder
+	for i, ch := range m.findInput {
+		if i == m.findCursor {
+			sb.WriteString(cursorStyle.Render(string(ch)))
+		} else {
+			sb.WriteString(string(ch))
+		}
+	}
+	if m.findCursor == len(m.findInput) {
+		sb.WriteString(cursorStyle.Render(" "))
+	}
+	return sb.String()
+}
+
 func (m Model) View() string {
 	border := borderBlurred.Width(m.width)
 	if m.focused {
@@ -1216,6 +1453,13 @@ func (m Model) View() string {
 			metaText += filterActiveStyle.Render("  📌 DIFF")
 		} else {
 			metaText += filterActiveStyle.Render("  📌 pinned")
+		}
+	}
+	if m.findRE != nil {
+		if n := len(m.findMatches); n > 0 {
+			metaText += findPromptStyle.Render(fmt.Sprintf("  🔍 %d/%d", m.findCurrent+1, n))
+		} else {
+			metaText += filterErrStyle.Render("  🔍 no matches")
 		}
 	}
 	meta := metaStyle.Render(metaText)
@@ -1445,11 +1689,18 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 			}
 			padded := padRight(raw, widths[i])
 			isCursor := m.focused && absRow == m.cursorRow && i == m.cursorCol
+			isFindCurrent := m.findCurrent >= 0 && m.findCurrent < len(m.findMatches) &&
+				m.findMatches[m.findCurrent][0] == absRow && m.findMatches[m.findCurrent][1] == i
+			isFindMatch := !isFindCurrent && m.findRE != nil && m.findRE.MatchString(formatCellRaw(val))
 			switch {
 			case isCursor && val == nil:
 				sb.WriteString(cursorNullStyle.Render(" " + padded + " "))
 			case isCursor:
 				sb.WriteString(cursorStyle.Render(" " + padded + " "))
+			case isFindCurrent:
+				sb.WriteString(findCurrentMatchStyle.Render(" " + padded + " "))
+			case isFindMatch:
+				sb.WriteString(findMatchStyle.Render(" " + padded + " "))
 			case val == nil:
 				sb.WriteString(nullStyle.Render(" " + padded + " "))
 			case m.hasFilter(i) && !matched:
@@ -1498,6 +1749,9 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 	}
 	if m.limitOpen {
 		sb.WriteString(m.renderLimitBar())
+	}
+	if m.findOpen {
+		sb.WriteString(m.renderFindBar())
 	}
 
 	return sb.String()
@@ -1788,6 +2042,7 @@ func (m Model) SetResults(sets []db.QueryResult) Model {
 	m.filterRE = nil
 	m.tags = nil
 	m.tagRange = false
+	m.clearFind()
 	m.scrollRow, m.scrollCol, m.cursorRow, m.cursorCol = 0, 0, 0, 0
 	// Reset sort and row detail state on new results.
 	m.sortCol = -1
@@ -1879,6 +2134,9 @@ func (m Model) visibleRows() int {
 		overhead++
 	}
 	if m.limitOpen {
+		overhead++
+	}
+	if m.findOpen {
 		overhead++
 	}
 	n := m.height - overhead

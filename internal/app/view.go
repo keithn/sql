@@ -31,6 +31,10 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.palette.View())
 	}
 
+	if m.rowEdit.Active() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.rowEdit.View())
+	}
+
 	if m.cellEdit.Active() {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.cellEdit.View())
 	}

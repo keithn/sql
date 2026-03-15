@@ -14,6 +14,7 @@ import (
 	"github.com/sqltui/sql/internal/ui/modal"
 	"github.com/sqltui/sql/internal/ui/palette"
 	"github.com/sqltui/sql/internal/ui/results"
+	"github.com/sqltui/sql/internal/ui/rowedit"
 	"github.com/sqltui/sql/internal/ui/schema"
 	"github.com/sqltui/sql/internal/ui/statusbar"
 	"github.com/sqltui/sql/internal/ui/updatepreview"
@@ -47,6 +48,7 @@ type Model struct {
 	cellView        cellview.Model
 	cellEdit        celledit.Model
 	cellEditCtx     results.CellContext // context captured when cell edit was opened
+	rowEdit         rowedit.Model
 	updatePreview   updatepreview.Model
 
 	activeConn        string
@@ -90,6 +92,7 @@ func New(cfg *config.Config, connectTo string) Model {
 		statusbar:   statusbar.New(),
 		modal:       modal.New(),
 		cellEdit:      celledit.New(),
+		rowEdit:       rowedit.New(),
 		updatePreview: updatepreview.New(),
 		ws:          ws,
 	}

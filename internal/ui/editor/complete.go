@@ -7,6 +7,19 @@ import (
 	"github.com/sqltui/sql/internal/db"
 )
 
+// keywordPhraseTable maps keywords to their standard multi-word expansion.
+// When a keyword in this table is completed, the full phrase is inserted instead
+// of just the single keyword, reducing keystrokes for common SQL patterns. (AC9)
+var keywordPhraseTable = map[string]string{
+	"ORDER": "ORDER BY",
+	"GROUP": "GROUP BY",
+	"LEFT":  "LEFT JOIN",
+	"RIGHT": "RIGHT JOIN",
+	"INNER": "INNER JOIN",
+	"CROSS": "CROSS JOIN",
+	"FULL":  "FULL OUTER JOIN",
+}
+
 // CompletionKind identifies what a popup item represents.
 type CompletionKind string
 
@@ -141,7 +154,14 @@ type completionPopup struct {
 func popupItemsFromCompletions(items []CompletionItem) []popupItem {
 	out := make([]popupItem, 0, len(items))
 	for _, item := range items {
-		out = append(out, popupItem{Text: item.Text, Kind: item.Kind})
+		pi := popupItem{Text: item.Text, Kind: item.Kind}
+		if item.Kind == CompletionKindKeyword {
+			if phrase, ok := keywordPhraseTable[item.Text]; ok {
+				pi.Text = phrase
+				pi.InsertText = phrase
+			}
+		}
+		out = append(out, pi)
 	}
 	return out
 }
@@ -177,25 +197,46 @@ func isWordRune(r rune) bool {
 // keywords first then extra schema items. Results are ranked by match score.
 // Returns at most maxItems results.
 func getCompletions(pattern string, extra []CompletionItem, maxItems int) []CompletionItem {
+	return getCompletionsCtx(pattern, extra, maxItems, false)
+}
+
+// getCompletionsCtx is like getCompletions but when schemaFirst is true it
+// puts schema/column items before keywords so they rank higher in fuzzy
+// tie-breaking — useful when the cursor is in a column or table name position. (AC6)
+func getCompletionsCtx(pattern string, extra []CompletionItem, maxItems int, schemaFirst bool) []CompletionItem {
 	if pattern == "" {
 		return nil
 	}
 	up := strings.ToUpper(pattern)
 
-	// Build a deduplicated candidate list: keywords first, then schema items.
 	seen := map[string]bool{}
 	candidates := make([]CompletionItem, 0, len(sqlKeywordItems)+len(extra))
-	for _, item := range sqlKeywordItems {
-		key := strings.ToUpper(item.Text)
-		candidates = append(candidates, item)
-		seen[key] = true
-	}
-	for _, item := range extra {
-		key := strings.ToUpper(item.Text)
-		if item.Text != "" && !seen[key] {
-			candidates = append(candidates, item)
-			seen[key] = true
+
+	addKeywords := func() {
+		for _, item := range sqlKeywordItems {
+			key := strings.ToUpper(item.Text)
+			if !seen[key] {
+				candidates = append(candidates, item)
+				seen[key] = true
+			}
 		}
+	}
+	addExtra := func() {
+		for _, item := range extra {
+			key := strings.ToUpper(item.Text)
+			if item.Text != "" && !seen[key] {
+				candidates = append(candidates, item)
+				seen[key] = true
+			}
+		}
+	}
+
+	if schemaFirst {
+		addExtra()
+		addKeywords()
+	} else {
+		addKeywords()
+		addExtra()
 	}
 
 	// Use a case-insensitive source so "sel" matches "SELECT" and "sales_table".
@@ -227,7 +268,9 @@ func (s popupItemSource) Len() int            { return len(s) }
 // It returns columns only from those referenced tables (each with a Detail field showing
 // alias or table name as the source), plus SQL keywords — all fuzzy-matched against word.
 // Returns nil if no table refs are detected or the schema is unavailable.
-func contextualColumnItems(word string, fullText string, cursorLine int, schema *db.Schema) []popupItem {
+// cursorCol is the column offset in the current line; it is used to detect dot-qualified
+// prefixes such as "u." (AC1) so only that table's columns are returned.
+func contextualColumnItems(word string, fullText string, cursorLine int, cursorCol int, schema *db.Schema) []popupItem {
 	if schema == nil {
 		return nil
 	}
@@ -243,6 +286,17 @@ func contextualColumnItems(word string, fullText string, cursorLine int, schema 
 	refs := parseSQLTableRefs(tokens)
 	if len(refs) == 0 {
 		return nil
+	}
+
+	// AC1: detect dot qualifier (e.g. "u." before the typed word) and restrict
+	// completions to only that table/alias's columns.
+	fullLines := strings.Split(fullText, "\n")
+	lineText := ""
+	if cursorLine < len(fullLines) {
+		lineText = fullLines[cursorLine]
+	}
+	if qual := dotQualifier(lineText, cursorCol); qual != "" {
+		return columnItemsForQualifier(qual, word, refs, schema)
 	}
 
 	// Build column candidates from each referenced table.
@@ -263,7 +317,7 @@ func contextualColumnItems(word string, fullText string, cursorLine int, schema 
 			colCandidates = append(colCandidates, popupItem{
 				Text:   col.Name,
 				Kind:   CompletionKindColumn,
-				Detail: qualifier,
+				Detail: columnDetail(qualifier, col), // AC2: include type + PK flag
 			})
 		}
 	}
@@ -285,7 +339,12 @@ func contextualColumnItems(word string, fullText string, cursorLine int, schema 
 	up := strings.ToUpper(word)
 	candidates := make([]popupItem, 0, len(sqlKeywords)+len(colCandidates))
 	for _, kw := range sqlKeywords {
-		candidates = append(candidates, popupItem{Text: kw, Kind: CompletionKindKeyword})
+		pi := popupItem{Text: kw, Kind: CompletionKindKeyword}
+		if phrase, ok := keywordPhraseTable[kw]; ok {
+			pi.Text = phrase
+			pi.InsertText = phrase
+		}
+		candidates = append(candidates, pi)
 	}
 	candidates = append(candidates, colCandidates...)
 
@@ -299,4 +358,207 @@ func contextualColumnItems(word string, fullText string, cursorLine int, schema 
 		}
 	}
 	return out
+}
+
+// columnDetail builds the Detail string for a column popup item, including the
+// table qualifier, column type, and PK flag when available. (AC2)
+func columnDetail(qualifier string, col db.ColumnDef) string {
+	typeStr := col.Type
+	if col.PrimaryKey {
+		if typeStr != "" {
+			typeStr += " PK"
+		} else {
+			typeStr = "PK"
+		}
+	}
+	if typeStr == "" {
+		return qualifier
+	}
+	if qualifier == "" {
+		return typeStr
+	}
+	return qualifier + "  " + typeStr
+}
+
+// dotQualifier returns the identifier that immediately precedes a "." before the
+// word at col in lineText, or "" if no such dot-qualifier exists.
+// Example: in "SELECT u.na|" (cursor at |), dotQualifier returns "u". (AC1)
+func dotQualifier(lineText string, col int) string {
+	if col > len(lineText) {
+		col = len(lineText)
+	}
+	// Skip back past the current word.
+	wordStart := col
+	for wordStart > 0 && isWordRune(rune(lineText[wordStart-1])) {
+		wordStart--
+	}
+	// Check for a dot immediately before the word.
+	if wordStart == 0 || lineText[wordStart-1] != '.' {
+		return ""
+	}
+	// Walk back past the qualifier identifier.
+	end := wordStart - 1 // position of the dot
+	start := end
+	for start > 0 && isWordRune(rune(lineText[start-1])) {
+		start--
+	}
+	if start == end {
+		return ""
+	}
+	return lineText[start:end]
+}
+
+// columnItemsForQualifier returns completion items for columns belonging to the
+// table/alias identified by qual in the given refs, fuzzy-matched against word. (AC1)
+func columnItemsForQualifier(qual, word string, refs []sqlTableRef, schema *db.Schema) []popupItem {
+	for _, ref := range refs {
+		if !strings.EqualFold(qualifierForTableRef(ref), qual) {
+			continue
+		}
+		info, ok := lookupSchemaTableInfo(schema, ref)
+		if !ok {
+			continue
+		}
+		var candidates []popupItem
+		for _, col := range info.Columns {
+			candidates = append(candidates, popupItem{
+				Text:   col.Name,
+				Kind:   CompletionKindColumn,
+				Detail: columnDetail(qual, col),
+			})
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+		if word == "" {
+			const maxBrowse = 15
+			if len(candidates) > maxBrowse {
+				return candidates[:maxBrowse]
+			}
+			return candidates
+		}
+		up := strings.ToUpper(word)
+		matches := fuzzy.FindFrom(up, popupItemSource(candidates))
+		const maxItems = 10
+		out := make([]popupItem, 0, maxItems)
+		for _, m := range matches {
+			out = append(out, candidates[m.Index])
+			if len(out) >= maxItems {
+				break
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// cursorInsideComment reports whether the cursor at (cursorLine, cursorCol)
+// falls inside a -- line comment or a /* */ block comment in text. (AC4)
+func cursorInsideComment(text string, cursorLine, cursorCol int) bool {
+	// Compute the rune offset of the cursor within the full text.
+	lines := strings.Split(text, "\n")
+	offset := 0
+	for i := 0; i < cursorLine && i < len(lines); i++ {
+		offset += len([]rune(lines[i])) + 1 // +1 for the newline
+	}
+	if cursorLine < len(lines) {
+		lr := []rune(lines[cursorLine])
+		c := cursorCol
+		if c > len(lr) {
+			c = len(lr)
+		}
+		offset += c
+	}
+	for _, tok := range scanSQLTokens(text) {
+		if tok.kind != sqlTokLineComment && tok.kind != sqlTokBlockComment {
+			continue
+		}
+		if tok.start < offset && offset <= tok.end {
+			return true
+		}
+	}
+	return false
+}
+
+// cursorAfterComparisonOp returns true when the non-whitespace token immediately
+// before the typed word is a comparison operator (=, <, >, !=, <>, <=, >=) or
+// the keyword LIKE. Autocomplete is suppressed in this context. (AC5)
+func cursorAfterComparisonOp(lineText string, col int) bool {
+	if col > len(lineText) {
+		col = len(lineText)
+	}
+	// Skip past the current word to find its start.
+	wordStart := col
+	for wordStart > 0 && isWordRune(rune(lineText[wordStart-1])) {
+		wordStart--
+	}
+	// Skip whitespace before the word.
+	i := wordStart - 1
+	for i >= 0 && (lineText[i] == ' ' || lineText[i] == '\t') {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	switch lineText[i] {
+	case '=', '<', '>':
+		return true
+	}
+	// Check for word-based comparison keyword (LIKE).
+	end := i + 1
+	for i >= 0 && isWordRune(rune(lineText[i])) {
+		i--
+	}
+	kw := strings.ToUpper(lineText[i+1 : end])
+	return kw == "LIKE"
+}
+
+// detectLastSQLClause scans tokens up to the cursor and returns the last
+// significant SQL clause keyword seen. Used to detect column vs table position
+// for schema-first ordering. (AC3/AC6)
+func detectLastSQLClause(fullText string, cursorLine, cursorCol int) string {
+	// Compute rune offset of cursor.
+	lines := strings.Split(fullText, "\n")
+	offset := 0
+	for i := 0; i < cursorLine && i < len(lines); i++ {
+		offset += len([]rune(lines[i])) + 1
+	}
+	if cursorLine < len(lines) {
+		lr := []rune(lines[cursorLine])
+		c := cursorCol
+		if c > len(lr) {
+			c = len(lr)
+		}
+		offset += c
+	}
+	clauseKW := map[string]bool{
+		"SELECT": true, "FROM": true, "WHERE": true,
+		"JOIN": true, "INNER": true, "LEFT": true, "RIGHT": true,
+		"FULL": true, "CROSS": true, "ON": true,
+		"SET": true, "AND": true, "OR": true, "HAVING": true,
+	}
+	last := ""
+	for _, tok := range scanSQLTokens(fullText) {
+		if tok.end > offset {
+			break
+		}
+		if tok.kind == sqlTokWord {
+			up := strings.ToUpper(tok.text)
+			if clauseKW[up] {
+				last = up
+			}
+		}
+	}
+	return last
+}
+
+// schemaFirstClause returns true when the SQL clause context suggests that
+// schema items (tables, columns) are more relevant than keywords. (AC6)
+func schemaFirstClause(clause string) bool {
+	switch clause {
+	case "SELECT", "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT",
+		"FULL", "CROSS", "ON", "SET", "AND", "OR", "HAVING":
+		return true
+	}
+	return false
 }

@@ -3,6 +3,7 @@
 package updatepreview
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -120,9 +121,9 @@ func (m Model) SetSize(w, h int) Model {
 	if overlayW < 40 {
 		overlayW = 40
 	}
-	overlayH := h - 6
-	if overlayH > 30 {
-		overlayH = 30
+	overlayH := h - 4
+	if overlayH > 50 {
+		overlayH = 50
 	}
 	if overlayH < 8 {
 		overlayH = 8
@@ -241,7 +242,7 @@ func (m Model) View() string {
 	// Hints
 	hints := "Ctrl+E execute  •  y copy  •  Esc close"
 	if total > vis {
-		hints += "  •  ↑↓ scroll"
+		hints += fmt.Sprintf("  •  ↑↓/jk/PgUp/PgDn scroll  •  %d/%d", m.scrollRow+1, total)
 	}
 	sb.WriteString(hintStyle.Render(hints))
 
