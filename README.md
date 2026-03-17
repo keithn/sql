@@ -6,7 +6,7 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 
 ## The Experiment
 
-This is a agentic AI coded piece of software.  It is an experiment in doing everything with an AI agent and working out the best ways to develop software this way.  While the version is less that 1.0.0 the software is likely to have a bunch of rough edges.  I'm dogfooding it and have replaced using DataGrip for this and will keep refining the progam until I think it's worth creating a v1.  
+This is a agentic AI coded piece of software.  It is an experiment in doing everything with an AI agent and working out the best ways to develop software this way.  While the version is less that 1.0.0 the software is likely to have a bunch of rough edges but my plans is to dogfood it (use it myself for real work) and have replaced using DataGrip. It is actually going really well and I find it a lot more useful than DataGrip (it is tailored to my workflows after all!).   Once I think it is reasonably well polished and feature complete I will do a v1.
 
 
 ## Features
