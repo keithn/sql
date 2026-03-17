@@ -335,6 +335,52 @@ func (b *Buffer) DeleteCharUnder() {
 }
 
 // DeleteLines deletes count lines at the cursor row, saving to the register (linewise).
+// JoinLines joins count lines starting at the cursor row into one line,
+// separating each joined pair with a single space (trailing/leading whitespace
+// is trimmed from the appended line, matching vim's J behaviour).
+// The cursor is left at the position of the first inserted space.
+func (b *Buffer) JoinLines(count int) {
+	if count < 2 {
+		count = 2
+	}
+	for i := 1; i < count; i++ {
+		if b.row+1 >= len(b.lines) {
+			break
+		}
+		cur := b.lines[b.row]
+		next := b.lines[b.row+1]
+
+		// Determine the join point: end of current line.
+		joinCol := len(cur)
+
+		// Trim leading whitespace from next line (vim trims it).
+		trimmed := []rune(strings.TrimLeft(string(next), " \t"))
+
+		// Build the joined line.
+		var joined []rune
+		if len(cur) > 0 && joinCol > 0 {
+			joined = append(joined, cur...)
+			joined = append(joined, ' ')
+		} else {
+			joined = append(joined, cur...)
+		}
+		joined = append(joined, trimmed...)
+
+		// Replace current line and remove next.
+		newLines := make([][]rune, len(b.lines)-1)
+		copy(newLines, b.lines[:b.row])
+		newLines[b.row] = joined
+		copy(newLines[b.row+1:], b.lines[b.row+2:])
+		b.lines = newLines
+
+		// Leave cursor at the space that was inserted (or end of original line).
+		if joinCol > 0 {
+			b.col = joinCol // position of the space
+		}
+	}
+	b.clamp()
+}
+
 func (b *Buffer) DeleteLines(count int) {
 	row := b.row
 	end := row + count

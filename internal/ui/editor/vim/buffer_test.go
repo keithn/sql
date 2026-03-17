@@ -470,3 +470,51 @@ func TestReplaceChar(t *testing.T) {
 		t.Errorf("want %q (clamped count), got %q", "--", got)
 	}
 }
+
+func TestJoinLines(t *testing.T) {
+	// Basic J: join current line with next
+	s := NewState()
+	s.Buf.SetValue("SELECT *\nFROM foo\nWHERE id = 1")
+	s.HandleKey("J")
+	if got := s.Buf.Value(); got != "SELECT * FROM foo\nWHERE id = 1" {
+		t.Errorf("J: want %q, got %q", "SELECT * FROM foo\nWHERE id = 1", got)
+	}
+	// Cursor should be at the space (col 8)
+	if s.Buf.CursorCol() != 8 {
+		t.Errorf("J: want cursor col 8, got %d", s.Buf.CursorCol())
+	}
+
+	// J on last line is a no-op
+	s2 := NewState()
+	s2.Buf.SetValue("only line")
+	s2.HandleKey("J")
+	if got := s2.Buf.Value(); got != "only line" {
+		t.Errorf("J on last line: want unchanged, got %q", got)
+	}
+
+	// 3J joins three lines
+	s3 := NewState()
+	s3.Buf.SetValue("a\nb\nc\nd")
+	s3.HandleKey("3")
+	s3.HandleKey("J")
+	if got := s3.Buf.Value(); got != "a b c\nd" {
+		t.Errorf("3J: want %q, got %q", "a b c\nd", got)
+	}
+
+	// Leading whitespace on next line is trimmed
+	s4 := NewState()
+	s4.Buf.SetValue("hello\n    world")
+	s4.HandleKey("J")
+	if got := s4.Buf.Value(); got != "hello world" {
+		t.Errorf("J trims leading ws: want %q, got %q", "hello world", got)
+	}
+
+	// J is undoable
+	s5 := NewState()
+	s5.Buf.SetValue("foo\nbar")
+	s5.HandleKey("J")
+	s5.HandleKey("u")
+	if got := s5.Buf.Value(); got != "foo\nbar" {
+		t.Errorf("J undo: want %q, got %q", "foo\nbar", got)
+	}
+}

@@ -159,8 +159,12 @@ func invalidSchemaHighlightSpansInBlock(block string, schema *db.Schema) []highl
 	if len(tokens) == 0 {
 		return nil
 	}
+	cteNames := parseCTENames(tokens)
 	spans := make([]highlightSpan, 0, len(refs))
 	for _, ref := range refs {
+		if cteNames[strings.ToLower(ref.base)] {
+			continue // CTE-defined name; not a schema table
+		}
 		if _, ok := lookupSchemaTableInfo(schema, ref); !ok {
 			spans = append(spans, highlightSpan{start: ref.nameStart, end: ref.nameEnd})
 		}
@@ -189,6 +193,73 @@ func invalidSchemaHighlightSpansInBlock(block string, schema *db.Schema) []highl
 		pos = endPos - 1
 	}
 	return spans
+}
+
+// parseCTENames returns a lowercase set of CTE names defined in a WITH clause.
+// Handles: WITH name AS (...), WITH name (cols) AS (...), and chained CTEs.
+func parseCTENames(tokens []sqlScanToken) map[string]bool {
+	sig := significantSQLTokenIndices(tokens)
+	names := make(map[string]bool)
+	for pos := 0; pos < len(sig); pos++ {
+		tok := tokens[sig[pos]]
+		if tok.kind != sqlTokWord || !strings.EqualFold(tok.text, "WITH") {
+			continue
+		}
+		pos++
+		for pos < len(sig) {
+			// Expect CTE name (word).
+			nameTok := tokens[sig[pos]]
+			if nameTok.kind != sqlTokWord {
+				break
+			}
+			cteName := strings.ToLower(normalizeSQLIdentifier(nameTok.text))
+			pos++
+			// Optionally skip column list: name (col1, col2, ...).
+			if pos < len(sig) && tokens[sig[pos]].text == "(" {
+				pos++ // consume '('
+				depth := 1
+				for pos < len(sig) && depth > 0 {
+					switch tokens[sig[pos]].text {
+					case "(":
+						depth++
+					case ")":
+						depth--
+					}
+					pos++
+				}
+			}
+			// Expect AS keyword.
+			if pos >= len(sig) || !strings.EqualFold(tokens[sig[pos]].text, "AS") {
+				break
+			}
+			pos++ // skip AS
+			// Expect '(' opening the CTE body.
+			if pos >= len(sig) || tokens[sig[pos]].text != "(" {
+				break
+			}
+			names[cteName] = true
+			pos++ // consume '('
+			// Skip to matching ')'.
+			depth := 1
+			for pos < len(sig) && depth > 0 {
+				switch tokens[sig[pos]].text {
+				case "(":
+					depth++
+				case ")":
+					depth--
+				}
+				pos++
+			}
+			// After the CTE body, check for comma (more CTEs follow).
+			if pos < len(sig) && tokens[sig[pos]].text == "," {
+				pos++ // consume ','
+			} else {
+				break
+			}
+		}
+		break // only one WITH clause per block
+	}
+	return names
 }
 
 func tokenWithinTableDecl(tok sqlScanToken, refs []sqlTableRef) bool {

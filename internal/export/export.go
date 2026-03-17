@@ -105,7 +105,7 @@ func SQLInsert(rs db.QueryResult, tableName string) string {
 	}
 	cols := make([]string, len(rs.Columns))
 	for i, c := range rs.Columns {
-		cols[i] = c.Name
+		cols[i] = "[" + strings.ReplaceAll(c.Name, "]", "]]") + "]"
 	}
 	colList := strings.Join(cols, ", ")
 	var sb strings.Builder

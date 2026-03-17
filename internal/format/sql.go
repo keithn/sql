@@ -156,8 +156,8 @@ func tokenise(s string) []token {
 			for j < len(s) && (isWordByte(s[j]) || s[j] >= '0' && s[j] <= '9') {
 				j++
 			}
-			// Handle qualified names: word.word
-			if j < len(s) && s[j] == '.' {
+			// Handle qualified names: word.word.word... (e.g. schema.dbo.Table)
+			for j < len(s) && s[j] == '.' && j+1 < len(s) && (isWordByte(s[j+1]) || s[j+1] >= '0' && s[j+1] <= '9') {
 				j++ // include the dot
 				for j < len(s) && (isWordByte(s[j]) || s[j] >= '0' && s[j] <= '9') {
 					j++
@@ -229,23 +229,46 @@ func setOf(words ...string) map[string]bool {
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
 
+// stmtFrame saves renderer state when entering a subquery so it can be
+// restored when the subquery's closing ')' is reached.
+type stmtFrame struct {
+	inSelect    bool
+	inWhere     bool
+	inSet       bool
+	afterJoin   bool
+	afterDelete bool
+	stmtIdx     int
+	selectCols  int
+	caseLevel   int // CASE nesting depth at stmtDepth
+	stmtDepth   int // paren depth at which this statement started
+	baseIndent  int // indent level for this statement
+}
+
 type rend struct {
 	tokens []token
 	pos    int
 
-	lines []string       // completed lines (trailing space already trimmed)
+	lines []string        // completed lines (trailing space already trimmed)
 	cur   strings.Builder // current line in progress
-	ps    bool           // pendingSpace: write a space before the next non-empty emit
+	ps    bool            // pendingSpace: write a space before the next non-empty emit
 
-	depth      int    // parenthesis depth
-	inSelect   bool   // inside SELECT column list at depth 0
-	inWhere    bool   // inside WHERE/HAVING clause at depth 0
-	inSet      bool   // inside SET clause
-	afterJoin  bool   // just emitted a JOIN; next ON should indent
-	afterDelete bool  // just emitted DELETE; next FROM should not clause-break
-	stmtIdx    int    // top-level statement counter
-	prevWord   string // most-recent word token (uppercased)
-	selectCols int    // pre-counted columns for current SELECT
+	depth       int    // parenthesis depth
+	inSelect    bool   // inside SELECT column list at stmtDepth
+	inWhere     bool   // inside WHERE/HAVING clause at stmtDepth
+	inSet       bool   // inside SET clause
+	afterJoin   bool   // just emitted a JOIN; next ON should indent
+	afterDelete bool   // just emitted DELETE; next FROM should not clause-break
+	stmtIdx     int    // top-level statement counter
+	prevWord    string // most-recent word token (uppercased)
+	selectCols  int    // pre-counted columns for current SELECT
+
+	// Subquery formatting state.
+	stmtDepth  int         // paren depth at which current statement formatting started (0 = top-level)
+	baseIndent int         // extra indent levels added by subquery nesting
+	subStack   []stmtFrame // saved frames for restoring after subquery closes
+
+	// CASE expression formatting state.
+	caseLevel int // number of CASE expressions open at stmtDepth
 }
 
 func render(tokens []token) string {
@@ -276,18 +299,35 @@ func render(tokens []token) string {
 
 // preCountCols counts SELECT columns in the first SELECT at depth 0.
 func preCountCols(tokens []token) int {
+	return preCountColsFrom(tokens, 0)
+}
+
+// preCountColsFrom counts SELECT columns starting at pos, treating depth 0
+// relative to the starting position (used for subquery SELECT column counts).
+func preCountColsFrom(tokens []token, startPos int) int {
 	depth := 0
 	inSel := false
 	count := 0
-	for _, t := range tokens {
+	for i, t := range tokens {
+		if i < startPos {
+			continue
+		}
 		if t.kind == tokWS {
 			continue
 		}
 		up := strings.ToUpper(t.val)
 		if !inSel {
-			if t.kind == tokWord && up == "SELECT" {
+			if t.kind == tokWord && up == "SELECT" && depth == 0 {
 				inSel = true
 				count = 1
+			}
+			if t.kind == tokLParen {
+				depth++
+			} else if t.kind == tokRParen {
+				depth--
+				if depth < 0 {
+					return 0
+				}
 			}
 			continue
 		}
@@ -383,25 +423,31 @@ func (r *rend) breakLine() {
 	r.ps = false
 }
 
-// clauseLine starts a new line and emits kw with a trailing space.
+// clauseLine starts a new line, applies base indent, then emits kw.
 func (r *rend) clauseLine(kw string) {
 	r.breakLine()
+	for i := 0; i < r.baseIndent; i++ {
+		r.cur.WriteString("    ")
+	}
 	r.cur.WriteString(kw)
 	r.ps = true
 }
 
-// subClauseLine starts a new line with `prefix` indent then kw.
+// subClauseLine starts a new line, applies base indent + prefix, then kw.
 func (r *rend) subClauseLine(indent, kw string) {
 	r.breakLine()
+	for i := 0; i < r.baseIndent; i++ {
+		r.cur.WriteString("    ")
+	}
 	r.cur.WriteString(indent)
 	r.cur.WriteString(kw)
 	r.ps = true
 }
 
-// indentLine starts a new line at depth n (n * 4 spaces).
+// indentLine starts a new line at (baseIndent + n) * 4 spaces.
 func (r *rend) indentLine(n int) {
 	r.breakLine()
-	for i := 0; i < n; i++ {
+	for i := 0; i < r.baseIndent+n; i++ {
 		r.cur.WriteString("    ")
 	}
 	r.ps = false
@@ -431,8 +477,8 @@ func (r *rend) run() {
 			r.emit(t.val)
 
 		case tokStar:
-			if r.depth > 0 {
-				// Inside parens: *, no spaces (e.g. count(*))
+			if r.depth > r.stmtDepth {
+				// Inside parens deeper than stmt level: *, no spaces (e.g. count(*))
 				r.ps = false
 				r.cur.WriteByte('*')
 			} else {
@@ -446,7 +492,7 @@ func (r *rend) run() {
 		case tokComma:
 			r.ps = false
 			r.cur.WriteByte(',')
-			if r.depth == 0 {
+			if r.depth == r.stmtDepth {
 				switch {
 				case r.inSelect:
 					r.indentLine(1)
@@ -471,7 +517,59 @@ func (r *rend) run() {
 			r.ps = false
 			r.depth++
 
+			// If the next significant token is SELECT or WITH, this paren opens
+			// a subquery. Switch to subquery formatting mode.
+			nextW := r.peekWord()
+			if nextW == "SELECT" || nextW == "WITH" {
+				r.subStack = append(r.subStack, stmtFrame{
+					inSelect:    r.inSelect,
+					inWhere:     r.inWhere,
+					inSet:       r.inSet,
+					afterJoin:   r.afterJoin,
+					afterDelete: r.afterDelete,
+					stmtIdx:     r.stmtIdx,
+					selectCols:  r.selectCols,
+					caseLevel:   r.caseLevel,
+					stmtDepth:   r.stmtDepth,
+					baseIndent:  r.baseIndent,
+				})
+				r.stmtDepth = r.depth
+				r.baseIndent++
+				r.inSelect = false
+				r.inWhere = false
+				r.inSet = false
+				r.afterJoin = false
+				r.afterDelete = false
+				r.stmtIdx = 0
+				r.caseLevel = 0
+				r.selectCols = preCountColsFrom(r.tokens, r.pos)
+				// The opening paren is already on the current line; the next
+				// clauseLine call (for SELECT/WITH) will break and indent.
+			}
+
 		case tokRParen:
+			// If this closes a subquery paren, break the line and restore state.
+			if len(r.subStack) > 0 && r.depth == r.stmtDepth {
+				r.breakLine()
+				f := r.subStack[len(r.subStack)-1]
+				r.subStack = r.subStack[:len(r.subStack)-1]
+				r.inSelect = f.inSelect
+				r.inWhere = f.inWhere
+				r.inSet = f.inSet
+				r.afterJoin = f.afterJoin
+				r.afterDelete = f.afterDelete
+				// Reset stmtIdx so the next statement (e.g. the SELECT after a CTE)
+			// does not get a blank-line separator — it's part of the same outer statement.
+				r.stmtIdx = 0
+				r.selectCols = f.selectCols
+				r.caseLevel = f.caseLevel
+				r.stmtDepth = f.stmtDepth
+				r.baseIndent = f.baseIndent
+				// Indent the closing paren at the restored base indent level.
+				for i := 0; i < r.baseIndent; i++ {
+					r.cur.WriteString("    ")
+				}
+			}
 			r.ps = false
 			r.cur.WriteByte(')')
 			r.ps = true
@@ -496,7 +594,7 @@ func (r *rend) run() {
 				display = up
 			}
 
-			// GO batch separator.
+			// GO batch separator (only at top level).
 			if up == "GO" && r.depth == 0 {
 				r.clauseLine("GO")
 				r.inSelect = false
@@ -508,10 +606,12 @@ func (r *rend) run() {
 			}
 
 			// Statement starters.
-			if statementStart[up] && r.depth == 0 {
+			if statementStart[up] && r.depth == r.stmtDepth {
 				if r.stmtIdx > 0 {
 					r.breakLine()
-					r.lines = append(r.lines, "") // blank line between statements
+					if r.baseIndent == 0 {
+						r.lines = append(r.lines, "") // blank line between top-level statements
+					}
 				}
 				r.stmtIdx++
 				r.inSelect = up == "SELECT"
@@ -530,7 +630,7 @@ func (r *rend) run() {
 			}
 
 			// UNION / INTERSECT / EXCEPT — own line; next SELECT follows immediately.
-			if compoundFirst[up] && r.depth == 0 {
+			if compoundFirst[up] && r.depth == r.stmtDepth {
 				compound := display
 				if r.peekWord() == "ALL" {
 					r.next() // consume ALL
@@ -545,7 +645,7 @@ func (r *rend) run() {
 			}
 
 			// GROUP BY / ORDER BY — clause line with compound keyword.
-			if (up == "GROUP" || up == "ORDER") && r.depth == 0 {
+			if (up == "GROUP" || up == "ORDER") && r.depth == r.stmtDepth {
 				compound := display
 				if r.peekWord() == "BY" {
 					r.next() // consume BY
@@ -559,7 +659,7 @@ func (r *rend) run() {
 			}
 
 			// JOIN keywords (INNER, LEFT, RIGHT, FULL, CROSS).
-			if joinFirst[up] && r.depth == 0 {
+			if joinFirst[up] && r.depth == r.stmtDepth {
 				// Consume JOIN.
 				joinType := display
 				if r.peekWord() == "JOIN" {
@@ -574,7 +674,7 @@ func (r *rend) run() {
 			}
 
 			// Plain JOIN keyword.
-			if up == "JOIN" && r.depth == 0 {
+			if up == "JOIN" && r.depth == r.stmtDepth {
 				r.clauseLine("JOIN")
 				r.afterJoin = true
 				r.inSelect = false
@@ -582,23 +682,16 @@ func (r *rend) run() {
 				continue
 			}
 
-			// ON after JOIN.
-			if up == "ON" && r.afterJoin && r.depth == 0 {
-				r.subClauseLine("    ", "ON")
+			// ON after JOIN — stays on the same line as the JOIN.
+			if up == "ON" && r.afterJoin && r.depth == r.stmtDepth {
 				r.afterJoin = false
-				r.prevWord = up
-				continue
-			}
-
-			// AND / OR inside WHERE or HAVING.
-			if (up == "AND" || up == "OR") && r.inWhere && r.depth == 0 {
-				r.subClauseLine("  ", display)
+				r.emit(display)
 				r.prevWord = up
 				continue
 			}
 
 			// SET keyword.
-			if up == "SET" && r.depth == 0 {
+			if up == "SET" && r.depth == r.stmtDepth {
 				r.clauseLine("SET")
 				r.inSet = true
 				r.inWhere = false
@@ -607,7 +700,7 @@ func (r *rend) run() {
 			}
 
 			// FROM: special-case after DELETE (stays on same line).
-			if up == "FROM" && r.afterDelete && r.depth == 0 {
+			if up == "FROM" && r.afterDelete && r.depth == r.stmtDepth {
 				r.emit("FROM")
 				r.afterDelete = false
 				r.prevWord = up
@@ -615,13 +708,40 @@ func (r *rend) run() {
 			}
 
 			// Clause-break keywords.
-			if clauseBreak[up] && r.depth == 0 {
+			if clauseBreak[up] && r.depth == r.stmtDepth {
 				r.clauseLine(display)
 				wasWhere := up == "WHERE" || up == "HAVING"
 				r.inWhere = wasWhere
 				r.inSelect = false
 				r.inSet = false
 				r.afterJoin = false
+				r.prevWord = up
+				continue
+			}
+
+			// CASE expression handling (at statement depth only).
+			if up == "CASE" && r.depth == r.stmtDepth {
+				// Break to a new indented line when inside a SELECT list or SET clause.
+				if r.inSelect || r.inSet {
+					r.indentLine(1)
+				}
+				r.emit(display)
+				r.caseLevel++
+				r.prevWord = up
+				continue
+			}
+
+			if (up == "WHEN" || up == "ELSE") && r.caseLevel > 0 && r.depth == r.stmtDepth {
+				r.indentLine(2)
+				r.emit(display)
+				r.prevWord = up
+				continue
+			}
+
+			if up == "END" && r.caseLevel > 0 && r.depth == r.stmtDepth {
+				r.indentLine(1)
+				r.emit(display)
+				r.caseLevel--
 				r.prevWord = up
 				continue
 			}

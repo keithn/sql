@@ -73,7 +73,7 @@ func TestJSON(t *testing.T) {
 
 func TestSQLInsert(t *testing.T) {
 	out := export.SQLInsert(sampleResult, "users")
-	if !strings.HasPrefix(out, "INSERT INTO users (id, name, value)") {
+	if !strings.HasPrefix(out, "INSERT INTO users ([id], [name], [value])") {
 		t.Errorf("unexpected header: %q", strings.SplitN(out, "\n", 2)[0])
 	}
 	// nil → NULL

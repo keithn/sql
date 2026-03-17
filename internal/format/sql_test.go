@@ -42,18 +42,12 @@ FROM customers`,
 		{
 			name:  "where with and",
 			input: "select id from users where active = 1 and role = 'admin'",
-			want: `SELECT id
-FROM users
-WHERE active = 1
-  AND role = 'admin'`,
+			want:  "SELECT id\nFROM users\nWHERE active = 1 AND role = 'admin'",
 		},
 		{
 			name:  "where with or",
 			input: "select id from users where active = 1 or role = 'guest'",
-			want: `SELECT id
-FROM users
-WHERE active = 1
-  OR role = 'guest'`,
+			want:  "SELECT id\nFROM users\nWHERE active = 1 OR role = 'guest'",
 		},
 		// --- JOIN ---
 		{
@@ -63,16 +57,14 @@ WHERE active = 1
     e.id,
     d.name
 FROM employees e
-INNER JOIN departments d
-    ON d.id = e.dept_id`,
+INNER JOIN departments d ON d.id = e.dept_id`,
 		},
 		{
 			name:  "left join",
 			input: "select e.id from employees e left join departments d on d.id = e.dept_id",
 			want: `SELECT e.id
 FROM employees e
-LEFT JOIN departments d
-    ON d.id = e.dept_id`,
+LEFT JOIN departments d ON d.id = e.dept_id`,
 		},
 		// --- ORDER BY / GROUP BY ---
 		{
@@ -170,8 +162,13 @@ FROM users`,
 		{
 			name:  "with cte",
 			input: "with cte as (select id from users) select * from cte",
-			// Sub-query inside parens is not re-formatted (depth > 0 suppresses clause breaks).
-			want: "WITH cte AS (SELECT id FROM users)\n\nSELECT *\nFROM cte",
+			want:  "WITH cte AS (\n    SELECT id\n    FROM users\n)\nSELECT *\nFROM cte",
+		},
+		// --- Subquery in FROM ---
+		{
+			name:  "subquery in from",
+			input: "select id from (select id, name from users where active = 1) sub",
+			want:  "SELECT id\nFROM (\n    SELECT\n        id,\n        name\n    FROM users\n    WHERE active = 1\n) sub",
 		},
 		// --- Identifiers left as-is ---
 		{
@@ -200,6 +197,8 @@ func TestFormatIdempotent(t *testing.T) {
 		"select e.id, d.name from employees e inner join departments d on d.id = e.dept_id where e.active = 1",
 		"insert into users (name, email) values ('Alice', 'alice@example.com')",
 		"update users set name = 'Bob' where id = 1",
+		"with cte as (select id from users) select * from cte",
+		"select id from (select id, name from users where active = 1) sub",
 	}
 	for _, input := range inputs {
 		first := Format(input)

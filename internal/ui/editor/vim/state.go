@@ -32,6 +32,7 @@ type Snapshot struct {
 	Mode          Mode
 	Anchor        Pos
 	TopRow        int
+	LeftCol       int
 	CountStr      string
 	Operator      rune
 	OperatorCount int
@@ -60,8 +61,9 @@ type State struct {
 	// Visual mode anchor.
 	Anchor Pos
 
-	// Viewport: first visible row.
-	TopRow int
+	// Viewport: first visible row and first visible column.
+	TopRow  int
+	LeftCol int
 
 	// Display dimensions (set by editor via SetSize).
 	width  int
@@ -92,6 +94,7 @@ func (s *State) Snapshot() Snapshot {
 		Mode:          s.Mode,
 		Anchor:        s.Anchor,
 		TopRow:        s.TopRow,
+		LeftCol:       s.LeftCol,
 		CountStr:      s.countStr,
 		Operator:      s.operator,
 		OperatorCount: s.operatorCount,
@@ -115,6 +118,10 @@ func (s *State) RestoreSnapshot(snapshot Snapshot) {
 	maxTop := max(0, s.Buf.LineCount()-1)
 	if s.TopRow > maxTop {
 		s.TopRow = maxTop
+	}
+	s.LeftCol = snapshot.LeftCol
+	if s.LeftCol < 0 {
+		s.LeftCol = 0
 	}
 	s.countStr = snapshot.CountStr
 	s.operator = snapshot.Operator
@@ -159,6 +166,24 @@ func (s *State) ScrollToReveal(height int) {
 	}
 	if s.TopRow < 0 {
 		s.TopRow = 0
+	}
+}
+
+// ScrollToRevealHoriz adjusts LeftCol so the cursor column is within the
+// visible content width.
+func (s *State) ScrollToRevealHoriz(contentWidth int) {
+	if contentWidth <= 0 {
+		return
+	}
+	col := s.Buf.col
+	if col < s.LeftCol {
+		s.LeftCol = col
+	}
+	if col >= s.LeftCol+contentWidth {
+		s.LeftCol = col - contentWidth + 1
+	}
+	if s.LeftCol < 0 {
+		s.LeftCol = 0
 	}
 }
 
@@ -363,6 +388,11 @@ func (s *State) handleNormal(key string) bool {
 			s.Buf.DeleteCharBefore()
 		}
 		s.resetMotion()
+	case "J": // join current line with next (count: join N lines)
+		s.Buf.PushUndo()
+		s.Buf.JoinLines(n)
+		s.resetMotion()
+
 	case "D": // delete to end of line (= d$)
 		s.Buf.PushUndo()
 		s.Buf.DeleteToEndOfLine()

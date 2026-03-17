@@ -48,6 +48,12 @@ const vimInsertCursorBlinkInterval = 600 * time.Millisecond
 // ExecuteBufferMsg asks the app to run the full buffer.
 type ExecuteBufferMsg struct{ SQL string }
 
+// QuitRequestMsg is sent when the user types :q / :wq in vim command mode.
+type QuitRequestMsg struct{}
+
+// internal alias so updateGotoLine can reference it without the package name.
+type quitRequestMsg = QuitRequestMsg
+
 // NewTabMsg asks the app to create a new query file and add a tab.
 type NewTabMsg struct{}
 
@@ -1255,7 +1261,7 @@ func (m Model) View() string {
 		gutterW := lineNumberGutterWidth(buf.LineCount())
 		cursorRow := buf.CursorRow() - vs.TopRow
 		popupRow = 1 + cursorRow + 1 // 1 for tab bar, +1 to place below cursor
-		popupCol = buf.CursorCol() + gutterW
+		popupCol = buf.CursorCol() - vs.LeftCol + gutterW
 	} else {
 		taView := m.tabs[m.active].ta.View()
 		li := m.tabs[m.active].ta.LineInfo()
@@ -1294,6 +1300,8 @@ func (m Model) renderVimContent() string {
 
 	lineCount := buf.LineCount()
 	gutterW := lineNumberGutterWidth(lineCount)
+	contentW := m.width - gutterW
+	vs.ScrollToRevealHoriz(contentW)
 	gutterDigits := gutterW - 3
 	blockStart, blockEnd, blockOK := m.blockRangeAtCursor()
 
@@ -1352,6 +1360,14 @@ func (m Model) renderVimContent() string {
 					Foreground(lipgloss.Color("#1e1e1e"))
 				hlText = injectCursorStyled(hlText, cursorCol, blockStyle)
 			}
+		}
+
+		// Apply horizontal scroll: crop left and truncate to visible width.
+		if vs.LeftCol > 0 {
+			hlText = skipVisualCols(hlText, vs.LeftCol)
+		}
+		if contentW > 0 {
+			hlText = xansi.Truncate(hlText, contentW, "")
 		}
 
 		result[i] = gutterStr + hlText
@@ -2118,6 +2134,22 @@ func (m Model) VimMode() string {
 
 // VimEnabled reports whether vim editing mode is enabled.
 func (m Model) VimEnabled() bool { return m.vimEnabled }
+
+// CursorPos returns the 1-based "row:col" string for the active tab's cursor.
+func (m Model) CursorPos() string {
+	if len(m.tabs) == 0 {
+		return ""
+	}
+	tab := &m.tabs[m.active]
+	if m.vimEnabled && tab.vim != nil {
+		row := tab.vim.Buf.CursorRow() + 1
+		col := tab.vim.Buf.CursorCol() + 1
+		return fmt.Sprintf("%d:%d", row, col)
+	}
+	row := tab.ta.Line() + 1
+	col := tab.ta.LineInfo().ColumnOffset + 1
+	return fmt.Sprintf("%d:%d", row, col)
+}
 
 // SetVimEnabled flips vim mode only when it differs from the current state.
 func (m Model) SetVimEnabled(enabled bool) Model {
@@ -2895,6 +2927,15 @@ func (m Model) updateGotoLine(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if input == "" {
 			return m, nil
 		}
+		// Dispatch vim ex-commands.
+		switch input {
+		case "q", "q!", "quit":
+			return m, func() tea.Msg { return quitRequestMsg{} }
+		case "wq":
+			// save is automatic (autosave); just quit
+			return m, func() tea.Msg { return quitRequestMsg{} }
+		}
+		// Otherwise treat as a line number.
 		n, err := strconv.Atoi(input)
 		if err != nil || n < 1 {
 			return m, nil
@@ -2912,7 +2953,8 @@ func (m Model) updateGotoLine(msg tea.KeyMsg) (Model, tea.Cmd) {
 	default:
 		if msg.Type == tea.KeyRunes {
 			for _, ch := range msg.Runes {
-				if ch >= '0' && ch <= '9' {
+				// Accept digits, letters, and ! for commands like :q!
+				if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '!' {
 					m.gotoInput = append(m.gotoInput, ch)
 				}
 			}
@@ -2966,7 +3008,7 @@ func (m Model) renderGotoLineBar() string {
 		sb.WriteString(gotoStyle.Render(string(ch)))
 	}
 	sb.WriteString(cursorSty.Render(" "))
-	sb.WriteString(hintSty.Render("  Enter go  Esc cancel"))
+	sb.WriteString(hintSty.Render("  Enter  Esc cancel  (line number or q/wq to quit)"))
 	return sb.String()
 }
 

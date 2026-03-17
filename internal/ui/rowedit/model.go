@@ -538,6 +538,7 @@ func (m Model) renderActiveEditor() string {
 }
 
 // renderVimLine renders a single-line vim buffer for the active field.
+// Horizontally scrolls so the cursor is always visible.
 func (m Model) renderVimLine() string {
 	if m.vs == nil {
 		return ""
@@ -557,26 +558,40 @@ func (m Model) renderVimLine() string {
 		w = 1
 	}
 
-	// Truncate line to visible width.
+	// Compute horizontal scroll offset so cursor stays in view.
+	hOff := 0
+	if col >= w {
+		hOff = col - w + 1
+	}
+
+	// Slice the visible window from the line.
+	if hOff > 0 && hOff < len(line) {
+		line = line[hOff:]
+	} else if hOff >= len(line) {
+		line = nil
+	}
+	visCol := col - hOff // cursor column within the visible window
+
+	// Truncate to visible width.
 	if len(line) > w {
 		line = line[:w]
 	}
 
 	var sb strings.Builder
 	for c, ch := range line {
-		if c == col {
+		if c == visCol {
 			sb.WriteString(cs.Render(string(ch)))
 		} else {
 			sb.WriteString(valueStyle.Render(string(ch)))
 		}
 	}
-	// Cursor past end.
-	if col >= len(line) && len(line) < w {
+	// Cursor past end of visible content.
+	if visCol >= len(line) && len(line) < w {
 		sb.WriteString(cs.Render(" "))
 	}
-	// Pad.
+	// Pad to full width.
 	vis := len(line)
-	if col >= len(line) && len(line) < w {
+	if visCol >= len(line) && len(line) < w {
 		vis++
 	}
 	if vis < w {

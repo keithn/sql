@@ -1016,7 +1016,7 @@ func TestFormatActiveBlockTextareaShortcutFormatsOnlyCurrentBlock(t *testing.T) 
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
 	m = nm
 
-	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1\n  AND role = 'admin'"
+	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1 AND role = 'admin'"
 	if got := m.tabs[0].ta.Value(); got != want {
 		t.Fatalf("textarea value after format = %q, want %q", got, want)
 	}
@@ -1036,7 +1036,7 @@ func TestFormatActiveBlockVimShortcutFormatsOnlyCurrentBlock(t *testing.T) {
 	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
 	m = nm
 
-	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1\n  AND role = 'admin'"
+	want := "select 1\n\nSELECT\n    id,\n    name\nFROM users\nWHERE active = 1 AND role = 'admin'"
 	if got := m.tabs[0].vim.Buf.Value(); got != want {
 		t.Fatalf("vim value after format = %q, want %q", got, want)
 	}

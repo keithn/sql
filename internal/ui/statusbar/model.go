@@ -65,6 +65,7 @@ type Model struct {
 	errMsg     string
 	pane       string // "EDITOR", "RESULTS", "SCHEMA"
 	colType    string // SQL type of cursor column in results (shown when results focused)
+	cursorPos  string // "row:col" shown when editor is focused
 }
 
 func New() Model {
@@ -116,6 +117,9 @@ func (m Model) View() string {
 		right += metaStyle.Render(fmt.Sprintf("%d rows  %dms", m.rowCount, m.durationMs))
 	}
 
+	if m.cursorPos != "" && m.pane == "EDITOR" {
+		right += metaStyle.Render(m.cursorPos)
+	}
 	right += metaStyle.Render(m.pane)
 
 	// Column type hint shown in the middle when results pane is focused.
@@ -160,5 +164,6 @@ func (m Model) SetRows(n int) Model        { m.rowCount = n; return m }
 func (m Model) SetDuration(ms int64) Model { m.durationMs = ms; return m }
 func (m Model) SetError(s string) Model    { m.errMsg = s; return m }
 func (m Model) SetPane(s string) Model     { m.pane = s; return m }
-func (m Model) SetColType(s string) Model  { m.colType = s; return m }
-func (m Model) SetMCPMode(on bool) Model   { m.mcpActive = on; return m }
+func (m Model) SetColType(s string) Model     { m.colType = s; return m }
+func (m Model) SetMCPMode(on bool) Model      { m.mcpActive = on; return m }
+func (m Model) SetCursorPos(s string) Model   { m.cursorPos = s; return m }

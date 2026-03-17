@@ -157,6 +157,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleMouse(msg)
 
+	case editor.QuitRequestMsg:
+		m.saveSession()
+		return m, tea.Quit
+
 	case ToggleVimMsg:
 		m.editor = m.editor.ToggleVim()
 		m.statusbar = m.statusbar.SetVimMode(m.editor.VimMode())
@@ -1800,6 +1804,7 @@ func (m Model) applyPaneFocus(p FocusedPane) (Model, tea.Cmd) {
 		m.results = m.results.Blur()
 		m.focused = PaneEditor
 		m.statusbar = m.statusbar.SetPane("EDITOR")
+		m.statusbar = m.statusbar.SetCursorPos(m.editor.CursorPos())
 		m.statusbar = m.statusbar.SetError("")
 		// Stop polling when the user moves to the editor.
 		if m.pollSecs > 0 {
@@ -1811,6 +1816,7 @@ func (m Model) applyPaneFocus(p FocusedPane) (Model, tea.Cmd) {
 		m.results = m.results.Focus()
 		m.focused = PaneResults
 		m.statusbar = m.statusbar.SetPane("RESULTS")
+		m.statusbar = m.statusbar.SetCursorPos("")
 		m.statusbar = m.statusbar.SetColType(m.results.CurrentColumnType())
 	case PaneSchema:
 		// Schema is now a popup; open the browser instead of switching layout pane
@@ -1830,8 +1836,9 @@ func (m Model) routeToFocused(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.focused {
 	case PaneEditor:
 		m.editor, cmd = m.editor.Update(msg)
-		// Keep vim mode indicator in sync after every key.
+		// Keep vim mode indicator and cursor position in sync after every key.
 		m.statusbar = m.statusbar.SetVimMode(m.editor.VimMode())
+		m.statusbar = m.statusbar.SetCursorPos(m.editor.CursorPos())
 		m.statusbar = m.statusbar.SetColType("")
 	case PaneResults:
 		m.results, cmd = m.results.Update(msg)
