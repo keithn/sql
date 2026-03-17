@@ -266,6 +266,9 @@ func extractTheme(tbl *lua.LTable, cfg *ThemeConfig) {
 	if v, ok := tableOptionalString(tbl, "line_number"); ok {
 		cfg.LineNumber = v
 	}
+	if v, ok := tableOptionalString(tbl, "active_line_number"); ok {
+		cfg.ActiveLineNumber = v
+	}
 	if v, ok := tableOptionalString(tbl, "cursor_line_number"); ok {
 		cfg.CursorLineNumber = v
 	}

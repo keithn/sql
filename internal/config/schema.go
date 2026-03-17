@@ -75,6 +75,7 @@ type ThemeConfig struct {
 	WarnColor         string
 	ConnColors        []string
 	LineNumber        string // gutter: non-cursor lines
+	ActiveLineNumber  string // gutter: lines in the active Ctrl+E block (not cursor)
 	CursorLineNumber  string // gutter: line the cursor is on
 	ActiveQueryGutter string // gutter: active Ctrl+E block marker background
 	InsertCursor      string // vim insert-mode cursor color

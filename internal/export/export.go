@@ -131,6 +131,23 @@ func SQLInsert(rs db.QueryResult, tableName string) string {
 	return sb.String()
 }
 
+// WhereIn exports the values of the first (and only) column as a SQL WHERE IN
+// list: (1,2,3) for numeric types or ('a','b','c') for strings.
+// Intended for use when the result or selection has exactly one column.
+func WhereIn(rs db.QueryResult) string {
+	if len(rs.Columns) == 0 || len(rs.Rows) == 0 {
+		return "()"
+	}
+	vals := make([]string, 0, len(rs.Rows))
+	for _, row := range rs.Rows {
+		if len(row) == 0 {
+			continue
+		}
+		vals = append(vals, sqlLiteral(row[0]))
+	}
+	return "(" + strings.Join(vals, ", ") + ")"
+}
+
 // ExtractTableName attempts to infer the primary table name from a SQL statement.
 // It handles SELECT … FROM <table>, UPDATE <table> SET …, INSERT INTO <table>,
 // and DELETE FROM <table>. Returns "table_name" if no table can be reliably extracted.

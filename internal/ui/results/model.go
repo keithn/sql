@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sahilm/fuzzy"
 	"github.com/sqltui/sql/internal/db"
 )
 
@@ -18,6 +19,11 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#ffffff")).
 			Background(lipgloss.Color("#2d2d2d"))
+
+	headerSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#ffffff")).
+				Background(lipgloss.Color("#6a0dad"))
 
 	cellStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#d4d4d4"))
@@ -44,7 +50,7 @@ var (
 
 	borderFocused = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), true, false, false, false).
-			BorderForeground(lipgloss.Color("#007acc"))
+			BorderForeground(lipgloss.Color("#6a0dad"))
 
 	borderBlurred = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), true, false, false, false).
@@ -170,6 +176,9 @@ type Model struct {
 	tagRange      bool         // true when visual range-tag mode is active (V key)
 	tagRangeStart int          // row index where V was pressed
 
+	// Column selection for selective export.
+	selectedCols map[int]bool // column index → selected; empty = all columns included
+
 	// Pin / diff mode.
 	pinnedResult *db.QueryResult // baseline pinned result; nil = not pinned
 	diffMode     bool            // true when showing a diff against pinnedResult
@@ -183,6 +192,20 @@ type Model struct {
 	findErr     string
 	findMatches [][2]int // [rowIdx, colIdx] into activeRows()
 	findCurrent int      // index into findMatches; -1 = none
+
+	// Column picker (\ key).
+	colPickerOpen         bool
+	colPickerSearchActive bool         // true = typing goes to search; false = list navigation mode
+	colPickerInput        []rune
+	colPickerCursor       int          // cursor within input
+	colPickerSel          int          // selected item index in filtered list
+	colPickerScroll       int          // scroll offset in filtered list
+	colPickerFiltered     []int        // column indices matching current input
+	colPickerTagged       map[int]bool // staged per-picker selection (Space key)
+	colPickerWindowH      int          // full terminal height, for listH computation
+
+	// Selected-only view (t key): show only tagged rows and/or selected columns.
+	showSelectedOnly bool
 }
 
 type diffStatus int
@@ -209,6 +232,9 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.colPickerOpen {
+			return m.updateColPicker(msg)
+		}
 		if m.rowDetailOpen {
 			return m.updateRowDetail(msg)
 		}
@@ -227,6 +253,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		rs := m.activeResult()
 		activeRows := m.activeRows()
+		// In selected-only mode with tagged rows, only those rows are shown.
+		if m.showSelectedOnly && len(m.tags) > 0 {
+			filtered := activeRows[:0:0]
+			for i, row := range activeRows {
+				if m.tags[i] {
+					filtered = append(filtered, row)
+				}
+			}
+			activeRows = filtered
+		}
 		total := len(activeRows)
 		vis := m.visibleRows()
 		maxScroll := total - vis
@@ -235,7 +271,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		maxScrollCol := 0
 		if rs != nil {
-			maxScrollCol = len(rs.Columns) - 1
+			displayCols := len(rs.Columns)
+			if m.showSelectedOnly && len(m.selectedCols) > 0 {
+				displayCols = len(m.selectedCols)
+			}
+			if displayCols > 0 {
+				maxScrollCol = displayCols - 1
+			}
 		}
 
 		switch msg.String() {
@@ -309,6 +351,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					if m.cursorCol >= colEnd {
 						m.scrollCol++
 					}
+				}
+			}
+			return m, nil
+		case "0":
+			m.cursorCol = 0
+			m.scrollCol = 0
+			return m, nil
+		case "$":
+			m.cursorCol = maxScrollCol
+			if len(m.colWidths) > 0 {
+				_, colEnd := m.visibleColRange(m.colWidths)
+				for m.cursorCol >= colEnd {
+					m.scrollCol++
+					_, colEnd = m.visibleColRange(m.colWidths)
 				}
 			}
 			return m, nil
@@ -405,6 +461,37 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 			m.tagRange = false
+			return m, nil
+		case "|":
+			// Toggle current column in/out of column selection.
+			if rs == nil {
+				return m, nil
+			}
+			col := m.cursorCol
+			if col < 0 || col >= len(rs.Columns) {
+				return m, nil
+			}
+			if m.selectedCols == nil {
+				m.selectedCols = make(map[int]bool)
+			}
+			if m.selectedCols[col] {
+				delete(m.selectedCols, col)
+			} else {
+				m.selectedCols[col] = true
+			}
+			return m, nil
+		case "ctrl+\\":
+			// Clear all column selections.
+			m.selectedCols = nil
+			return m, nil
+		case "\\":
+			if rs != nil {
+				m = m.openColPicker()
+			}
+			return m, nil
+		case "t":
+			m.showSelectedOnly = !m.showSelectedOnly
+			m.scrollRow, m.scrollCol, m.cursorRow, m.cursorCol = 0, 0, 0, 0
 			return m, nil
 		case "/":
 			m = m.OpenFind()
@@ -796,6 +883,46 @@ func (m Model) TaggedResult() *db.QueryResult {
 	result := *rs
 	result.Rows = tagged
 	return &result
+}
+
+// ExportResult returns a QueryResult scoped to tagged rows (if any) and
+// selected columns (if any). Falls back to the full active result set.
+func (m Model) ExportResult() *db.QueryResult {
+	rs := m.TaggedResult()
+	if rs == nil {
+		rs = m.activeResult()
+	}
+	if rs == nil || len(m.selectedCols) == 0 {
+		return rs
+	}
+	// Build ordered list of selected column indices.
+	colIndices := make([]int, 0, len(m.selectedCols))
+	for i := range rs.Columns {
+		if m.selectedCols[i] {
+			colIndices = append(colIndices, i)
+		}
+	}
+	if len(colIndices) == 0 {
+		return rs
+	}
+	filtered := &db.QueryResult{
+		Duration: rs.Duration,
+		Columns:  make([]db.Column, len(colIndices)),
+		Rows:     make([][]any, len(rs.Rows)),
+	}
+	for j, ci := range colIndices {
+		filtered.Columns[j] = rs.Columns[ci]
+	}
+	for i, row := range rs.Rows {
+		filteredRow := make([]any, len(colIndices))
+		for j, ci := range colIndices {
+			if ci < len(row) {
+				filteredRow[j] = row[ci]
+			}
+		}
+		filtered.Rows[i] = filteredRow
+	}
+	return filtered
 }
 
 // ActiveResult returns the active QueryResult, or nil if none.
@@ -1369,6 +1496,356 @@ func (m Model) updateFind(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// openColPicker initialises and opens the column picker overlay.
+func (m Model) openColPicker() Model {
+	m.colPickerOpen = true
+	m.colPickerSearchActive = true
+	m.colPickerInput = nil
+	m.colPickerCursor = 0
+	m.colPickerSel = 0
+	m.colPickerScroll = 0
+	m.colPickerTagged = nil
+	m.syncColPickerFilter()
+	return m
+}
+
+// ColPickerOpen reports whether the column picker overlay is showing.
+func (m Model) ColPickerOpen() bool { return m.colPickerOpen }
+
+// syncColPickerFilter rebuilds colPickerFiltered from the current input.
+func (m *Model) syncColPickerFilter() {
+	rs := m.activeResult()
+	if rs == nil {
+		m.colPickerFiltered = nil
+		return
+	}
+	query := strings.TrimSpace(string(m.colPickerInput))
+	if query == "" {
+		m.colPickerFiltered = make([]int, len(rs.Columns))
+		for i := range rs.Columns {
+			m.colPickerFiltered[i] = i
+		}
+		return
+	}
+	names := make([]string, len(rs.Columns))
+	for i, c := range rs.Columns {
+		names[i] = c.Name
+	}
+	matches := fuzzy.Find(strings.ToLower(query), lowerAllStrings(names))
+	m.colPickerFiltered = make([]int, 0, len(matches))
+	for _, match := range matches {
+		m.colPickerFiltered = append(m.colPickerFiltered, match.Index)
+	}
+	if m.colPickerSel >= len(m.colPickerFiltered) {
+		m.colPickerSel = max(0, len(m.colPickerFiltered)-1)
+	}
+}
+
+// SetColPickerWindowH stores the full terminal height so the picker's listH
+// matches what ColPickerView actually renders.
+func (m Model) SetColPickerWindowH(h int) Model { m.colPickerWindowH = h; return m }
+
+// colPickerListH returns the number of visible list rows in the picker panel.
+func (m Model) colPickerListH() int {
+	h := m.colPickerWindowH
+	if h == 0 {
+		h = m.height
+	}
+	listH := h - 8
+	if listH < 3 {
+		listH = 3
+	}
+	return listH
+}
+
+// colPickerScrollToSel scrolls down only when the selected item goes below the visible window.
+func (m *Model) colPickerScrollToSel() {
+	listH := m.colPickerListH()
+	if m.colPickerSel >= m.colPickerScroll+listH {
+		m.colPickerScroll = m.colPickerSel - listH + 1
+	}
+}
+
+func lowerAllStrings(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
+// updateColPicker handles keys while the column picker overlay is open.
+func (m Model) updateColPicker(msg tea.KeyMsg) (Model, tea.Cmd) {
+	rs := m.activeResult()
+
+	// Keys that work in both modes.
+	switch msg.String() {
+	case "esc":
+		m.colPickerOpen = false
+		m.colPickerTagged = nil
+		return m, nil
+	case "enter":
+		if len(m.colPickerTagged) > 0 {
+			if m.selectedCols == nil {
+				m.selectedCols = make(map[int]bool)
+			}
+			for idx := range m.colPickerTagged {
+				if m.selectedCols[idx] {
+					delete(m.selectedCols, idx)
+				} else {
+					m.selectedCols[idx] = true
+				}
+			}
+		} else if len(m.colPickerFiltered) > 0 && m.colPickerSel < len(m.colPickerFiltered) {
+			colIdx := m.colPickerFiltered[m.colPickerSel]
+			m.cursorCol = colIdx
+			if colIdx < m.scrollCol {
+				m.scrollCol = colIdx
+			} else if rs != nil {
+				cw := m.colWidths
+				if len(cw) != len(rs.Columns) {
+					cw = computeColWidths(*rs)
+				}
+				_, colEnd := m.visibleColRange(cw)
+				if colIdx >= colEnd {
+					m.scrollCol = colIdx
+				}
+			}
+		}
+		m.colPickerOpen = false
+		m.colPickerTagged = nil
+		return m, nil
+	}
+
+	if m.colPickerSearchActive {
+		// Search mode: typing updates the filter; down arrow enters list mode.
+		switch msg.String() {
+		case "down", "tab":
+			m.colPickerSearchActive = false
+			return m, nil
+		case "backspace":
+			if m.colPickerCursor > 0 {
+				m.colPickerInput = append(m.colPickerInput[:m.colPickerCursor-1], m.colPickerInput[m.colPickerCursor:]...)
+				m.colPickerCursor--
+				m.colPickerSel = 0
+				m.colPickerScroll = 0
+				m.syncColPickerFilter()
+			}
+		case "delete":
+			if m.colPickerCursor < len(m.colPickerInput) {
+				m.colPickerInput = append(m.colPickerInput[:m.colPickerCursor], m.colPickerInput[m.colPickerCursor+1:]...)
+				m.colPickerSel = 0
+				m.colPickerScroll = 0
+				m.syncColPickerFilter()
+			}
+		case "left":
+			if m.colPickerCursor > 0 {
+				m.colPickerCursor--
+			}
+		case "right":
+			if m.colPickerCursor < len(m.colPickerInput) {
+				m.colPickerCursor++
+			}
+		case "home", "ctrl+a":
+			m.colPickerCursor = 0
+		case "end", "ctrl+e":
+			m.colPickerCursor = len(m.colPickerInput)
+		case "ctrl+u":
+			m.colPickerInput = nil
+			m.colPickerCursor = 0
+			m.colPickerSel = 0
+			m.colPickerScroll = 0
+			m.syncColPickerFilter()
+		default:
+			if msg.Type == tea.KeyRunes {
+				ins := msg.Runes
+				m.colPickerInput = append(m.colPickerInput[:m.colPickerCursor], append(ins, m.colPickerInput[m.colPickerCursor:]...)...)
+				m.colPickerCursor += len(ins)
+				m.colPickerSel = 0
+				m.colPickerScroll = 0
+				m.syncColPickerFilter()
+			}
+		}
+	} else {
+		// List navigation mode: \ returns to search mode.
+		switch msg.String() {
+		case "\\":
+			m.colPickerSearchActive = true
+			return m, nil
+		case "up", "shift+tab":
+			if m.colPickerSel > 0 {
+				m.colPickerSel--
+				if m.colPickerSel < m.colPickerScroll {
+					m.colPickerScroll = m.colPickerSel
+				}
+			}
+		case "down", "tab":
+			if m.colPickerSel < len(m.colPickerFiltered)-1 {
+				m.colPickerSel++
+				m.colPickerScrollToSel()
+			}
+		case " ":
+			if len(m.colPickerFiltered) > 0 && m.colPickerSel < len(m.colPickerFiltered) {
+				colIdx := m.colPickerFiltered[m.colPickerSel]
+				if m.colPickerTagged == nil {
+					m.colPickerTagged = make(map[int]bool)
+				}
+				if m.colPickerTagged[colIdx] {
+					delete(m.colPickerTagged, colIdx)
+				} else {
+					m.colPickerTagged[colIdx] = true
+				}
+				if m.colPickerSel < len(m.colPickerFiltered)-1 {
+					m.colPickerSel++
+					m.colPickerScrollToSel()
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// ColPickerView renders the column picker overlay, sized to fit in w×h.
+func (m Model) ColPickerView(w, h int) string {
+	rs := m.activeResult()
+
+	// Panel sizing: up to 50 wide, up to h-4 tall (leaving space around it).
+	panelW := 50
+	if w-4 < panelW {
+		panelW = w - 4
+	}
+	if panelW < 24 {
+		panelW = 24
+	}
+	innerW := panelW - 4 // border (2) + padding (2)
+
+	// Number of list rows: h minus title, input, separator, footer, border = h - 8
+	listH := h - 8
+	if listH < 3 {
+		listH = 3
+	}
+	if rs != nil && len(rs.Columns) < listH {
+		listH = len(rs.Columns)
+	}
+
+	var colPickerTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#6a0dad")).Padding(0, 1)
+	var colPickerBorderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#6a0dad")).Padding(0, 1)
+	var colPickerSelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#264f78"))
+	var colPickerTagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#dcdcaa"))
+	var colPickerTagSelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#dcdcaa")).Background(lipgloss.Color("#264f78"))
+	var colPickerDimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	var colPickerHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+
+	var sb strings.Builder
+
+	// Title.
+	sb.WriteString(colPickerTitleStyle.Render("Column Picker"))
+	sb.WriteByte('\n')
+
+	// Search input line — dimmed when in list navigation mode.
+	totalCols := 0
+	if rs != nil {
+		totalCols = len(rs.Columns)
+	}
+	countStr := colPickerDimStyle.Render(fmt.Sprintf("%d/%d", len(m.colPickerFiltered), totalCols))
+	countLen := len(fmt.Sprintf("%d/%d", len(m.colPickerFiltered), totalCols))
+	var inputLine string
+	if m.colPickerSearchActive {
+		prompt := filterPromptStyle.Render("\\ ")
+		inputStr := m.renderColPickerInput()
+		inputLine = prompt + inputStr
+	} else {
+		inputLine = colPickerDimStyle.Render("\\ " + string(m.colPickerInput))
+	}
+	inputLineLen := 2 + len(m.colPickerInput) + 1
+	pad := innerW - inputLineLen - countLen
+	if pad < 1 {
+		pad = 1
+	}
+	sb.WriteString(inputLine + strings.Repeat(" ", pad) + countStr + "\n")
+
+	// Separator — brighter when list is active.
+	sepStyle := colPickerDimStyle
+	if !m.colPickerSearchActive {
+		sepStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6a0dad"))
+	}
+	sb.WriteString(sepStyle.Render(strings.Repeat("─", innerW)) + "\n")
+
+	// List.
+	for i := 0; i < listH; i++ {
+		idx := m.colPickerScroll + i
+		if rs == nil || idx >= len(m.colPickerFiltered) {
+			sb.WriteString(strings.Repeat(" ", innerW) + "\n")
+			continue
+		}
+		colIdx := m.colPickerFiltered[idx]
+		name := rs.Columns[colIdx].Name
+		tagged := m.colPickerTagged[colIdx]
+		alreadySel := m.selectedCols[colIdx]
+		isSel := idx == m.colPickerSel
+
+		prefix := "  "
+		if tagged {
+			prefix = "◆ "
+		} else if alreadySel {
+			prefix = "◈ "
+		}
+		line := prefix + name
+		runes := []rune(line)
+		if len(runes) > innerW {
+			line = string(runes[:innerW-1]) + "…"
+		} else {
+			line = padRight(line, innerW)
+		}
+		switch {
+		case isSel && tagged:
+			sb.WriteString(colPickerTagSelStyle.Render(line))
+		case isSel:
+			sb.WriteString(colPickerSelStyle.Render(line))
+		case tagged:
+			sb.WriteString(colPickerTagStyle.Render(line))
+		default:
+			sb.WriteString(line)
+		}
+		sb.WriteByte('\n')
+	}
+
+	// Footer hint — changes based on active mode.
+	sb.WriteString(colPickerDimStyle.Render(strings.Repeat("─", innerW)) + "\n")
+	var hintText string
+	if m.colPickerSearchActive {
+		hintText = "↓/Tab  enter list  Enter  jump  Esc  close"
+	} else {
+		hintText = "↑↓  navigate  Space  tag  \\  search  Enter  apply  Esc  close"
+	}
+	if len([]rune(hintText)) > innerW {
+		if m.colPickerSearchActive {
+			hintText = "↓ list  Enter jump  Esc close"
+		} else {
+			hintText = "↑↓ nav  Space tag  \\ search  Enter"
+		}
+	}
+	sb.WriteString(colPickerHintStyle.Render(hintText))
+
+	panel := colPickerBorderStyle.Width(panelW).Render(sb.String())
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m Model) renderColPickerInput() string {
+	var sb strings.Builder
+	for i, ch := range m.colPickerInput {
+		if i == m.colPickerCursor {
+			sb.WriteString(cursorStyle.Render(string(ch)))
+		} else {
+			sb.WriteString(string(ch))
+		}
+	}
+	if m.colPickerCursor == len(m.colPickerInput) {
+		sb.WriteString(cursorStyle.Render(" "))
+	}
+	return sb.String()
+}
+
 func (m Model) renderFindBar() string {
 	total := len(m.findMatches)
 	var countStr string
@@ -1448,6 +1925,9 @@ func (m Model) View() string {
 	if n := len(m.tags); n > 0 {
 		metaText += filterActiveStyle.Render(fmt.Sprintf("  ● %d tagged", n))
 	}
+	if n := len(m.selectedCols); n > 0 {
+		metaText += filterActiveStyle.Render(fmt.Sprintf("  ◆ %d cols", n))
+	}
 	if m.pinnedResult != nil {
 		if m.diffMode {
 			metaText += filterActiveStyle.Render("  📌 DIFF")
@@ -1468,7 +1948,8 @@ func (m Model) View() string {
 	if m.diffMode && len(m.diffRows) > 0 {
 		grid = m.renderDiffGrid(rs)
 	} else {
-		grid = m.renderGrid(rs)
+		gridRS, gridRows, allSel := m.gridData()
+		grid = m.renderGrid(gridRS, gridRows, allSel)
 	}
 	return border.Render(title + header + meta + "\n" + grid)
 }
@@ -1480,11 +1961,21 @@ func (m Model) renderTitle() string {
 		Foreground(lipgloss.Color("#666666"))
 	if m.focused {
 		sty = sty.
-			Background(lipgloss.Color("#007acc")).
+			Background(lipgloss.Color("#6a0dad")).
 			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true)
 	}
-	return sty.Render("RESULTS") + "\n"
+	title := sty.Render("RESULTS")
+	if m.showSelectedOnly {
+		badge := lipgloss.NewStyle().
+			Padding(0, 1).
+			Background(lipgloss.Color("#1a6b1a")).
+			Foreground(lipgloss.Color("#4ec9b0")).
+			Bold(true).
+			Render("SELECTED ONLY")
+		title += " " + badge
+	}
+	return title + "\n"
 }
 
 func (m Model) renderResultTabs() string {
@@ -1501,9 +1992,82 @@ func (m Model) renderResultTabs() string {
 	return strings.Join(tabs, "│")
 }
 
+// gridData returns the QueryResult and rows to render, filtered to the
+// selected columns and/or tagged rows when showSelectedOnly is true.
+// allSelected is true when columns were filtered (all shown cols are "selected").
+func (m Model) gridData() (rs db.QueryResult, rows [][]any, allSelected bool) {
+	orig := m.activeResult()
+	if orig == nil {
+		return db.QueryResult{}, nil, false
+	}
+	rows = m.activeRows()
+
+	filterCols := m.showSelectedOnly && len(m.selectedCols) > 0
+	filterRows := m.showSelectedOnly && len(m.tags) > 0
+
+	if !filterCols && !filterRows {
+		return *orig, rows, false
+	}
+
+	// Build column map: newIdx → origIdx.
+	var colMap []int
+	if filterCols {
+		for i := range orig.Columns {
+			if m.selectedCols[i] {
+				colMap = append(colMap, i)
+			}
+		}
+	}
+	if len(colMap) == 0 {
+		colMap = make([]int, len(orig.Columns))
+		for i := range colMap {
+			colMap[i] = i
+		}
+		filterCols = false
+	}
+
+	filtCols := make([]db.Column, len(colMap))
+	for i, oi := range colMap {
+		filtCols[i] = orig.Columns[oi]
+	}
+
+	// Filter rows.
+	if filterRows {
+		var filtered [][]any
+		for i, row := range rows {
+			if m.tags[i] {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+
+	// Remap row data to filtered columns.
+	if filterCols {
+		mapped := make([][]any, len(rows))
+		for ri, row := range rows {
+			nr := make([]any, len(colMap))
+			for ni, oi := range colMap {
+				if oi < len(row) {
+					nr[ni] = row[oi]
+				}
+			}
+			mapped[ri] = nr
+		}
+		rows = mapped
+	}
+
+	rs = db.QueryResult{
+		Columns:  filtCols,
+		Rows:     rows,
+		Duration: orig.Duration,
+	}
+	return rs, rows, filterCols
+}
+
 var rowNumStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
 
-func (m Model) renderGrid(rs db.QueryResult) string {
+func (m Model) renderGrid(rs db.QueryResult, rows [][]any, allColsSelected bool) string {
 	if len(rs.Columns) == 0 {
 		return metaStyle.Render("  (no columns)")
 	}
@@ -1511,7 +2075,7 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 	// Row-number column: width is the digit count of the last visible row + 1 for the "#" header.
 	rowNumW := 0
 	if m.showRowNums {
-		rowNumW = len(fmt.Sprintf("%d", len(rs.Rows)))
+		rowNumW = len(fmt.Sprintf("%d", len(rows)))
 		if rowNumW < 1 {
 			rowNumW = 1
 		}
@@ -1522,7 +2086,8 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 		rowNumColW = rowNumW + 3 // " " + digits + " " + "│"
 	}
 	// Tag gutter: 1 char (●) + │ = 2 chars, shown when any rows are tagged or range is active.
-	showTagGutter := len(m.tags) > 0 || m.tagRange
+	// In selected-only mode all visible rows are tagged, so no gutter needed.
+	showTagGutter := !m.showSelectedOnly && (len(m.tags) > 0 || m.tagRange)
 	tagGutterW := 0
 	if showTagGutter {
 		tagGutterW = 2 // "●" + "│"
@@ -1541,6 +2106,10 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 			widths[i] = maxColWidth
 		} else {
 			widths[i] = w
+		}
+		// Selected columns get a "◆ " prefix (2 chars) — expand width so the name never truncates.
+		if allColsSelected || m.selectedCols[i] {
+			widths[i] += 2
 		}
 	}
 
@@ -1568,7 +2137,6 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 		}
 	}
 
-	rows := m.activeRows()
 	total := len(rows)
 	vis := m.visibleRows()
 	rowStart := m.scrollRow
@@ -1626,17 +2194,33 @@ func (m Model) renderGrid(rs db.QueryResult) string {
 				name += " ▼"
 			}
 		}
-		if runeLen(name) > widths[i] {
-			name = string([]rune(name)[:widths[i]-1]) + "…"
+		// Prefix for selected columns — width was already expanded by 2 to fit it.
+		prefix := ""
+		if allColsSelected || m.selectedCols[i] {
+			prefix = "◆ "
 		}
-		cell := padRight(name, widths[i])
+		if runeLen(prefix+name) > widths[i] {
+			avail := widths[i] - runeLen(prefix) - 1
+			if avail < 1 {
+				avail = 1
+			}
+			name = string([]rune(name)[:avail]) + "…"
+		}
+		cell := padRight(prefix+name, widths[i])
 		sty := headerStyle
+		if allColsSelected || m.selectedCols[i] {
+			sty = headerSelectedStyle
+		}
 		if m.hasFilter(i) {
 			sty = sty.Underline(true)
 		}
 		sb.WriteString(sty.Render(" " + cell + " "))
 		if i < colEnd-1 {
-			sb.WriteString(headerStyle.Render("│"))
+			sep := headerStyle
+			if allColsSelected || m.selectedCols[i] || m.selectedCols[i+1] {
+				sep = headerSelectedStyle
+			}
+			sb.WriteString(sep.Render("│"))
 		}
 	}
 	sb.WriteByte('\n')
@@ -2042,6 +2626,8 @@ func (m Model) SetResults(sets []db.QueryResult) Model {
 	m.filterRE = nil
 	m.tags = nil
 	m.tagRange = false
+	m.selectedCols = nil
+	m.showSelectedOnly = false
 	m.clearFind()
 	m.scrollRow, m.scrollCol, m.cursorRow, m.cursorCol = 0, 0, 0, 0
 	// Reset sort and row detail state on new results.

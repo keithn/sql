@@ -59,6 +59,7 @@ const (
 	exportMarkdown  = "export.markdown"
 	exportJSON      = "export.json"
 	exportSQLInsert = "export.sql_insert"
+	exportWhereIn   = "export.where_in"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -744,6 +745,7 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Focus editor.
 	case "f3", "alt+1":
 		m.resultsFullscreen = false
+		m.queryFocus = false
 		return m.focusPane(PaneEditor)
 
 	// Focus results.
@@ -751,8 +753,21 @@ func (m Model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.focusPane(PaneResults)
 
 	// Toggle results fullscreen.
-	case "ctrl+l":
+	case "ctrl+l", "Z":
+		if msg.String() == "Z" && m.focused != PaneResults {
+			break
+		}
+		m.queryFocus = false
 		m.resultsFullscreen = !m.resultsFullscreen
+		return m.applySize()
+
+	// Query-focus: shrink editor to active block, expand results.
+	case "z":
+		if m.focused != PaneResults {
+			break
+		}
+		m.resultsFullscreen = false
+		m.queryFocus = !m.queryFocus
 		return m.applySize()
 
 	// Toggle vim mode.
@@ -1473,8 +1488,8 @@ func (m Model) openCellView() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openExportPalette() (tea.Model, tea.Cmd) {
-	rs := m.results.ActiveResult()
-	if rs == nil {
+	exportRS := m.results.ExportResult()
+	if exportRS == nil {
 		m.statusbar = m.statusbar.SetError("no results to export")
 		return m, nil
 	}
@@ -1483,10 +1498,15 @@ func (m Model) openExportPalette() (tea.Model, tea.Cmd) {
 		dest = "file"
 	}
 	items := []palette.Item{
-		{Key: exportCSV, Title: "CSV", Badge: ".csv", Summary: "Comma-separated values (RFC 4180) → " + dest, Search: "csv comma"},
-		{Key: exportMarkdown, Title: "Markdown", Badge: ".md", Summary: "GitHub-flavored Markdown table → " + dest, Search: "markdown md table"},
-		{Key: exportJSON, Title: "JSON", Badge: ".json", Summary: "JSON array of objects → " + dest, Search: "json"},
-		{Key: exportSQLInsert, Title: "SQL INSERT", Badge: ".sql", Summary: "INSERT INTO statements → " + dest, Search: "sql insert"},
+		{Key: exportCSV, Title: "CSV", Badge: ".csv", Summary: "Comma-separated values (RFC 4180)", Search: "csv comma"},
+		{Key: exportMarkdown, Title: "Markdown", Badge: ".md", Summary: "GitHub-flavored Markdown table", Search: "markdown md table"},
+		{Key: exportJSON, Title: "JSON", Badge: ".json", Summary: "JSON array of objects", Search: "json"},
+		{Key: exportSQLInsert, Title: "SQL INSERT", Badge: ".sql", Summary: "INSERT INTO statements", Search: "sql insert"},
+	}
+	if len(exportRS.Columns) == 1 {
+		items = append(items, palette.Item{
+			Key: exportWhereIn, Title: "WHERE IN", Badge: "()", Summary: "Single-column value list", Search: "where in list",
+		})
 	}
 	var cmd tea.Cmd
 	m.palette, cmd = m.palette.OpenExport(items, dest)
@@ -1517,14 +1537,10 @@ func (m Model) handleScreenshot() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleExportSelection(key string) (tea.Model, tea.Cmd) {
-	rs := m.results.ActiveResult()
+	rs := m.results.ExportResult()
 	if rs == nil {
 		m.statusbar = m.statusbar.SetError("no results to export")
 		return m, nil
-	}
-	// Use only tagged rows if any rows are tagged.
-	if tagged := m.results.TaggedResult(); tagged != nil {
-		rs = tagged
 	}
 
 	content, err := exportContent(key, *rs, m.lastSQL)
@@ -1564,6 +1580,8 @@ func exportContent(key string, rs db.QueryResult, lastSQL string) (string, error
 		return export.JSON(rs)
 	case exportSQLInsert:
 		return export.SQLInsert(rs, export.ExtractTableName(lastSQL)), nil
+	case exportWhereIn:
+		return export.WhereIn(rs), nil
 	}
 	return "", nil
 }
@@ -1578,6 +1596,8 @@ func exportExt(key string) string {
 		return "json"
 	case exportSQLInsert:
 		return "sql"
+	case exportWhereIn:
+		return "txt"
 	}
 	return ""
 }
@@ -1889,7 +1909,7 @@ func (m Model) applySize() (tea.Model, tea.Cmd) {
 	}
 	layout := m.layoutMetrics()
 	m.editor = m.editor.SetSize(layout.contentW, layout.editorH)
-	m.results = m.results.SetSize(layout.contentW, layout.resultsH)
+	m.results = m.results.SetSize(layout.contentW, layout.resultsH).SetColPickerWindowH(m.height)
 	m.schema = m.schema.SetSize(m.width, m.height)
 	m.help = m.help.SetSize(m.width-6, minInt(m.height-2, 24))
 	m.cellView = m.cellView.SetSize(m.width, m.height)
@@ -1918,6 +1938,23 @@ func (m Model) layoutMetrics() paneLayout {
 
 	if m.resultsFullscreen {
 		return paneLayout{editorH: 0, resultsH: available, contentW: m.width}
+	}
+
+	if m.queryFocus {
+		// Editor shows tab bar (1) + active block lines + 1 padding.
+		blockLines := m.editor.ActiveBlockLineCount()
+		editorH := 1 + blockLines + 1 // tab bar + block + padding
+		if editorH > available/2 {
+			editorH = available / 2
+		}
+		if editorH < 3 {
+			editorH = 3
+		}
+		resultsH := available - editorH
+		if resultsH < 1 {
+			resultsH = 1
+		}
+		return paneLayout{editorH: editorH, resultsH: resultsH, contentW: m.width}
 	}
 
 	editorH := (available * 6) / 10

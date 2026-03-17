@@ -1516,7 +1516,9 @@ func (m Model) renderContent() string {
 func (m Model) renderGutter(text string, cursorLine bool, activeBlock bool) string {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(m.cfg.Theme.LineNumber))
 	if cursorLine {
-		style = style.Foreground(lipgloss.Color(m.cfg.Theme.CursorLineNumber))
+		style = style.Foreground(lipgloss.Color(m.cfg.Theme.CursorLineNumber)).Bold(true)
+	} else if activeBlock {
+		style = style.Foreground(lipgloss.Color(m.cfg.Theme.ActiveLineNumber))
 	}
 	if !strings.HasSuffix(text, "│") {
 		if activeBlock {
@@ -1739,11 +1741,16 @@ func (m Model) renderTabBar() string {
 		Foreground(lipgloss.Color("#666666"))
 	if m.focused {
 		labelStyle = labelStyle.
-			Background(lipgloss.Color("#007acc")).
+			Background(lipgloss.Color("#6a0dad")).
 			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true)
 	}
 	label := labelStyle.Render("EDITOR")
+
+	activeFileStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#dcdcaa")).
+		Background(lipgloss.Color("#007acc")).
+		Padding(0, 1)
 
 	var tabs []string
 	for i, t := range m.tabs {
@@ -1752,11 +1759,11 @@ func (m Model) renderTabBar() string {
 			title += " •"
 		}
 		if i == m.active && m.focused {
-			tabs = append(tabs, activeTabStyle.Render(title))
+			tabs = append(tabs, activeFileStyle.Render(title))
 		} else if i == m.active {
 			tabs = append(tabs, lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#aaaaaa")).
-				Background(lipgloss.Color("#2d2d2d")).
+				Foreground(lipgloss.Color("#1e1e1e")).
+				Background(lipgloss.Color("#dcdcaa")).
 				Padding(0, 1).Render(title))
 		} else {
 			tabs = append(tabs, inactiveTabStyle.Render(title))
@@ -2075,6 +2082,27 @@ func (m Model) Value() string {
 // CurrentBlock returns the logical SQL block at the current cursor position.
 func (m Model) CurrentBlock() string {
 	return m.blockAtCursor()
+}
+
+// ActiveBlockLineCount returns the number of lines in the active query block.
+func (m Model) ActiveBlockLineCount() int {
+	if m.active < 0 || m.active >= len(m.tabs) {
+		return 1
+	}
+	var text string
+	var cursorLine int
+	if m.vimEnabled && m.tabs[m.active].vim != nil {
+		text = m.tabs[m.active].vim.Buf.Value()
+		cursorLine = m.tabs[m.active].vim.Buf.CursorRow()
+	} else {
+		text = m.tabs[m.active].ta.Value()
+		cursorLine = m.tabs[m.active].ta.Line()
+	}
+	start, end, ok := detectBlockRange(text, cursorLine)
+	if !ok {
+		return 1
+	}
+	return end - start + 1
 }
 
 // WordAtCursor returns the SQL identifier token under the cursor, or "".

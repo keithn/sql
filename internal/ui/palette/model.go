@@ -64,7 +64,25 @@ var (
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#007acc"))
 	metaStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#9cdcfe"))
 	emptyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	keyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#6a0dad")).Padding(0, 1)
+	footerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
 )
+
+// renderFooter wraps key names (Enter, Tab, Esc, Ctrl+X, etc.) in a purple badge.
+func renderFooter(text string) string {
+	// Split on " • " separator, highlight the key token in each segment.
+	segments := strings.Split(text, " • ")
+	for i, seg := range segments {
+		// First word(s) up to the first space is the key name.
+		idx := strings.Index(seg, " ")
+		if idx < 0 {
+			segments[i] = keyStyle.Render(seg)
+		} else {
+			segments[i] = keyStyle.Render(seg[:idx]) + footerStyle.Render(seg[idx:])
+		}
+	}
+	return strings.Join(segments, footerStyle.Render(" • "))
+}
 
 func New() Model {
 	input := textinput.New()
@@ -130,8 +148,8 @@ func (m Model) Close() Model {
 }
 
 func (m Model) SetSize(w, h int) Model {
-	if w > 72 {
-		w = 72
+	if w > 84 {
+		w = 84
 	}
 	if w < 24 {
 		w = 24
@@ -213,24 +231,27 @@ func (m Model) View() string {
 	if len(m.filtered) == 0 {
 		lines = append(lines, emptyStyle.Render(m.empty))
 	} else {
-		badgeW := 0
+		badgeW, titleW := 0, 0
 		for _, item := range m.filtered {
 			if w := len(itemBadge(item)); w > badgeW {
 				badgeW = w
+			}
+			if w := len(item.Title); w > titleW {
+				titleW = w
 			}
 		}
 		for i, item := range m.filtered {
 			if i >= maxItems {
 				break
 			}
-			line := renderItemLine(item, badgeW)
+			line := renderItemLine(item, titleW, badgeW)
 			if i == m.cursor {
 				line = selectedStyle.Width(max(0, m.width-4)).Render(strings.TrimRight(line, " "))
 			}
 			lines = append(lines, line)
 		}
 	}
-	lines = append(lines, "", emptyStyle.Render(m.footer))
+	lines = append(lines, "", renderFooter(m.footer))
 	content := strings.Join(lines, "\n")
 	return panelStyle.Width(m.width).Height(m.height).Render(content)
 }
@@ -263,18 +284,18 @@ func (m *Model) syncFiltered() {
 	}
 }
 
-func renderItemLine(item Item, badgeW int) string {
+func renderItemLine(item Item, titleW, badgeW int) string {
 	badge := itemBadge(item)
 	if badge == "" {
 		if item.Summary == "" {
-			return "  " + item.Title
+			return fmt.Sprintf("  %-*s", titleW, item.Title)
 		}
-		return fmt.Sprintf("  %s  %s", item.Title, metaStyle.Render(item.Summary))
+		return fmt.Sprintf("  %-*s  %s", titleW, item.Title, metaStyle.Render(item.Summary))
 	}
 	if item.Summary == "" {
-		return fmt.Sprintf("  %s  %-*s", item.Title, badgeW, badge)
+		return fmt.Sprintf("  %-*s  %-*s", titleW, item.Title, badgeW, badge)
 	}
-	return fmt.Sprintf("  %s  %-*s  %s", item.Title, badgeW, badge, metaStyle.Render(item.Summary))
+	return fmt.Sprintf("  %-*s  %-*s  %s", titleW, item.Title, badgeW, badge, metaStyle.Render(item.Summary))
 }
 
 func itemBadge(item Item) string {

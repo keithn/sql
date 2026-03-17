@@ -67,7 +67,8 @@ type Model struct {
 
 	mcpQueryReply chan<- mcp.Reply // pending MCP execute_query reply channel; nil if none
 	pollSecs             int    // active poll interval in seconds (0 = off)
-	resultsFullscreen    bool   // true when results pane is expanded to fill the whole window
+	resultsFullscreen    bool   // true when results pane is expanded to fill the whole window (Z)
+	queryFocus           bool   // true when editor is shrunk to active block only (z)
 	mcpMode              bool   // true when the MCP server is running
 	mcpAddr              string // address the MCP server is listening on
 

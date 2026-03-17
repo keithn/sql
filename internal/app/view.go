@@ -51,5 +51,9 @@ func (m Model) View() string {
 		return m.results.RowDetailView(m.width, m.height)
 	}
 
+	if m.results.ColPickerOpen() {
+		return m.results.ColPickerView(m.width, m.height)
+	}
+
 	return content
 }

@@ -19,12 +19,13 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 - **Schema-aware assistance** — autocomplete, JOIN predicate inference, missing-table highlighting
 - **Schema browser** — `Ctrl+B`/`F2`; fuzzy filter, column selection for JOIN-aware SELECT, action menu (`a`), row counts (`r`)
 - **Vim mode** — toggleable; persistent across sessions; supports motions, operators, visual, undo/redo; shown in status bar
-- **Results grid** — virtual scrolling, column sort (`s`), row numbers (`#`), stacked column filters (`f`), configurable row limit (`L`), poll/auto-refresh (`P`), fullscreen (`Ctrl+L`)
+- **Results grid** — virtual scrolling, column sort (`s`), row numbers (`#`), stacked column filters (`f`), configurable row limit (`L`), poll/auto-refresh (`P`), zoom modes (`z`/`Z`)
 - **Row detail view** — `Enter` opens a vertical column/value overlay; navigate rows with `h`/`l`
 - **Row tagging** — `Space` tags rows; `V` range-tag; `Ctrl+A` tag all/clear; tagged rows highlighted; export respects selection
+- **Column selection** — `|` toggles a column (purple header); `\` opens a fuzzy column picker with multi-select; `t` toggles SELECTED ONLY view showing only tagged rows and/or selected columns
 - **Result diff/pin** — `p` pins the current result; re-running the same query shows added/removed/changed rows
 - **Cell edit → UPDATE** — `e` in the results grid or row detail view opens an inline cell editor (with vim mode); on confirm an UPDATE preview panel appears showing the generated SQL — execute it with `Ctrl+E`, copy with `y`, close with `Esc`; results refresh automatically on success; `Ctrl+D` sets the value to NULL
-- **Export** — `E` in results: CSV, Markdown, JSON, or SQL INSERT — to clipboard or file
+- **Export** — `X` in results: CSV, Markdown, JSON, SQL INSERT, or WHERE IN list — honours row tags and column selection; to clipboard or file
 - **Screenshot** — `F10` captures the current view to clipboard or file
 - **MCP server mode** — `--mcp` starts a background JSON-RPC server so Claude Code can drive the TUI as an agent
 - **Multi-tab editor** — `Ctrl+N` new tab, `Ctrl+W` close, `Ctrl+PgDn`/`Ctrl+PgUp` switch
@@ -156,24 +157,32 @@ Command palette (`Ctrl+P`) also exposes:
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Scroll rows |
 | `PgUp` / `PgDn` | Scroll a page |
-| `Home` / `End` | Jump to top / bottom |
+| `Home` / `End` | Jump to top / bottom row |
 | `←` / `→` or `h` / `l` | Scroll columns |
+| `0` / `$` | Jump to first / last column |
 | `Alt+PgUp` / `Alt+PgDn` | Previous / next result set |
 | `Enter` | Row detail view (vertical) |
 | `s` | Sort by cursor column (cycles: none → ▲ → ▼) |
-| `f` | Filter by cursor column (stacks — add multiple) |
+| `f` | Filter by cursor column (regex, stacks — add multiple) |
 | `F` | Clear all filters |
 | `#` | Toggle row numbers |
 | `L` | Change row limit |
 | `p` | Pin result as diff baseline (re-run to see diff) |
 | `P` | Toggle poll / auto-refresh |
-| `Space` | Tag / untag current row |
+| `Space` | Tag / untag current row (advances cursor) |
 | `V` | Range-tag rows |
 | `Ctrl+A` | Tag all rows / clear all tags |
+| `\|` | Toggle current column selection (purple header) |
+| `\` | Column picker — fuzzy search columns; `↓`/Tab enters list, Space tags, Enter applies |
+| `Ctrl+\` | Clear all column selections |
+| `t` | Toggle **SELECTED ONLY** view — show only tagged rows and/or selected columns |
 | `e` | Edit cell → UPDATE preview panel |
-| `E` | Export (CSV / Markdown / JSON / SQL INSERT) |
+| `E` | Row edit form (multi-column UPDATE) |
+| `X` | Export (CSV / Markdown / JSON / SQL INSERT / WHERE IN → clipboard or file) |
+| `v` | Open cell value viewer |
 | `y` | Copy current cell to clipboard |
-| `Ctrl+L` | Toggle results fullscreen |
+| `z` | Zoom: shrink editor to active query block |
+| `Z` | Zoom: results fullscreen (hides editor) |
 | `F10` | Screenshot to clipboard / file |
 
 ### Row detail view

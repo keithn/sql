@@ -88,8 +88,9 @@ func (m Model) helpTabs() []uihelp.Tab {
 			Lines: []string{
 				"• Arrows / hjkl — move cell",
 				"• PgUp / PgDn — page up/down",
-				"• Home / End — first / last column",
-				"• Alt+PgUp / Alt+PgDn — first / last row",
+				"• Home / End — first / last row",
+				"• 0 / $ — first / last column",
+				"• Alt+PgUp / Alt+PgDn — previous / next result set",
 			},
 		}, {
 			Title: "Viewing",
@@ -98,23 +99,35 @@ func (m Model) helpTabs() []uihelp.Tab {
 				"• v — open cell value viewer",
 				"• y — yank cell value to clipboard",
 				"• # — toggle row numbers",
-				"• Ctrl+L — toggle results fullscreen (hides editor)",
+				"• z — zoom: shrink editor to active block only",
+				"• Z — zoom: results fullscreen (hides editor)",
 			},
 		}, {
 			Title: "Filtering & sorting",
 			Lines: []string{
 				"• / — find across all columns (n/N next/prev, Esc clear)",
-				"• f — filter column (regex)",
+				"• f — filter column (regex, stacks)",
 				"• F — clear all filters",
 				"• s — cycle column sort (asc / desc / off)",
 				"• L — change result limit",
+			},
+		}, {
+			Title: "Row & column selection",
+			Lines: []string{
+				"• Space — tag / untag current row (advances cursor)",
+				"• V — range-tag rows",
+				"• Ctrl+A — tag all rows / clear all tags",
+				"• | — toggle current column selection (purple header)",
+				"• \\ — column picker (fuzzy search; ↓/Tab → list, Space tag, Enter apply)",
+				"• Ctrl+\\ — clear all column selections",
+				"• t — toggle SELECTED ONLY view (shows only tagged rows + selected columns)",
 			},
 		}, {
 			Title: "Actions",
 			Lines: []string{
 				"• e — edit cell (generates single-column UPDATE, pastes into editor)",
 				"• E — row edit form (Tab/Shift+Tab fields, Ctrl+S multi-column UPDATE, Esc cancel)",
-				"• X — export (CSV / Markdown / JSON / SQL INSERT → file or clipboard)",
+				"• X — export (CSV / Markdown / JSON / SQL INSERT / WHERE IN → file or clipboard)",
 				"• p — pin baseline; re-run query then p again to see diff",
 				"• P — set poll interval (auto-refresh)",
 				"• r — re-run last query",
