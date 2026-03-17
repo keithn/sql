@@ -4,6 +4,11 @@ A terminal SQL client for developers who live in the terminal. First-class MS SQ
 
 ![Go](https://img.shields.io/badge/go-1.21+-00ADD8?logo=go)
 
+## The Experiment
+
+This is a agentic AI coded piece of software.  It is an experiment in doing everything with an AI agent and working out the best ways to develop software this way.  While the version is less that 1.0.0 the software is likely to have a bunch of rough edges.  I'm dogfooding it and have replaced using DataGrip for this and will keep refining the progam until I think it's worth creating a v1.  
+
+
 ## Features
 
 - **Multi-database** — SQL Server, PostgreSQL, SQLite (pure Go, no CGo)
