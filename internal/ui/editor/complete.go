@@ -452,6 +452,36 @@ func columnItemsForQualifier(qual, word string, refs []sqlTableRef, schema *db.S
 	return nil
 }
 
+// cursorInsideStringLiteral reports whether the cursor at (cursorLine, cursorCol)
+// falls inside a single-quoted SQL string literal. Autocomplete is suppressed
+// in this context because completions for SQL keywords or schema names are not
+// meaningful inside string values.
+func cursorInsideStringLiteral(text string, cursorLine, cursorCol int) bool {
+	lines := strings.Split(text, "\n")
+	offset := 0
+	for i := 0; i < cursorLine && i < len(lines); i++ {
+		offset += len([]rune(lines[i])) + 1
+	}
+	if cursorLine < len(lines) {
+		lr := []rune(lines[cursorLine])
+		c := cursorCol
+		if c > len(lr) {
+			c = len(lr)
+		}
+		offset += c
+	}
+	for _, tok := range scanSQLTokens(text) {
+		if tok.kind != sqlTokString {
+			continue
+		}
+		// tok.end is exclusive (one past closing quote); cursor at tok.end is after the string.
+		if tok.start < offset && offset < tok.end {
+			return true
+		}
+	}
+	return false
+}
+
 // cursorInsideComment reports whether the cursor at (cursorLine, cursorCol)
 // falls inside a -- line comment or a /* */ block comment in text. (AC4)
 func cursorInsideComment(text string, cursorLine, cursorCol int) bool {

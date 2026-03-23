@@ -165,6 +165,33 @@ func TestContextualColumnItems_Suppressed(t *testing.T) {
 
 // ── AC4: comment suppression ──────────────────────────────────────────────────
 
+func TestCursorInsideStringLiteral(t *testing.T) {
+	text := "WHERE name = 'hello world'"
+	// Cursor inside the string value.
+	if !cursorInsideStringLiteral(text, 0, 20) {
+		t.Fatal("expected cursor inside string literal to be detected")
+	}
+	// Cursor before the opening quote.
+	if cursorInsideStringLiteral(text, 0, 13) {
+		t.Fatal("cursor before string literal should not be detected")
+	}
+	// Cursor after the closing quote.
+	if cursorInsideStringLiteral(text, 0, len(text)) {
+		t.Fatal("cursor after string literal should not be detected")
+	}
+}
+
+func TestUpdatePopupSuppressedInsideStringLiteral(t *testing.T) {
+	m := New(testConfig())
+	m = m.SetSize(80, 8)
+	m = m.SetTabs([]TabState{{Path: "q.sql", Content: "WHERE name = 'hel"}})
+	setTextareaCursor(&m.tabs[0].ta, 0, len("WHERE name = 'hel"))
+	m.updatePopup()
+	if m.popup.visible {
+		t.Fatal("popup should be hidden when cursor is inside a string literal")
+	}
+}
+
 func TestCursorInsideLineComment(t *testing.T) {
 	text := "SELECT * FROM t -- this is a comment"
 	// Cursor inside the comment text.

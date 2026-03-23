@@ -2665,8 +2665,8 @@ func (m *Model) updatePopupVim() {
 	col := buf.CursorCol()
 	lineText := string(line)
 
-	// AC4: suppress inside comments.
-	if cursorInsideComment(buf.Value(), lineNum, col) {
+	// AC4: suppress inside comments or string literals.
+	if cursorInsideComment(buf.Value(), lineNum, col) || cursorInsideStringLiteral(buf.Value(), lineNum, col) {
 		m.popup.visible = false
 		return
 	}
@@ -2779,8 +2779,8 @@ func (m *Model) updatePopup() {
 	}
 	col := ta.LineInfo().CharOffset
 
-	// AC4: suppress inside comments.
-	if cursorInsideComment(ta.Value(), lineNum, col) {
+	// AC4: suppress inside comments or string literals.
+	if cursorInsideComment(ta.Value(), lineNum, col) || cursorInsideStringLiteral(ta.Value(), lineNum, col) {
 		m.popup.visible = false
 		return
 	}
